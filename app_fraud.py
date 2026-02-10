@@ -258,7 +258,7 @@ def main():
     
     # Menu latéral
     with st.sidebar:
-        st.image("https://via.placeholder.com/200x80/667eea/ffffff?text=In%27li", 
+        st.image("Logo - BO RH in'li.png", 
                  use_container_width=True)
         st.markdown("---")
         
