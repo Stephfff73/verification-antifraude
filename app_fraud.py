@@ -26,7 +26,7 @@ from utils.scoring_engine import calculate_fraud_score, generate_report
 
 # Configuration de la page
 st.set_page_config(
-    page_title="In'li - Anti-Fraude Documentaire",
+    page_title="App - Anti-Fraude Documentaire",
     page_icon="🔍",
     layout="wide",
     initial_sidebar_state="expanded"
