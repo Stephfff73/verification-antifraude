@@ -1,7 +1,6 @@
 """
 🔍 IN'LI - SYSTÈME PROFESSIONNEL DE DÉTECTION DE FRAUDE DOCUMENTAIRE
 Application Streamlit avancée pour la vérification des dossiers locataires
-Version Professionnelle 2.0 - Expert Anti-Fraude depuis 40 ans
 """
 
 import streamlit as st
@@ -826,8 +825,8 @@ def main():
             st.metric("Score de fraude", f"{risk_color} {score:.1f}%")
         
         st.markdown("---")
-        st.caption("Version Professionnelle 2.0")
-        st.caption("Expert Anti-Fraude depuis 40 ans")
+        st.caption("Version Beta Test du 10/02/2026")
+
     
     # Routage des pages
     if page == "🏠 Accueil":
