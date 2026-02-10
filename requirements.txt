@@ -1,0 +1,16 @@
+# Core Streamlit
+streamlit>=1.31.0
+
+# Data manipulation
+pandas>=2.0.0
+numpy>=1.24.0
+
+# PDF processing (SANS pikepdf qui nécessite qpdf système)
+PyPDF2>=3.0.0
+Pillow>=10.0.0
+
+# Visualization
+plotly>=5.18.0
+
+# Excel export
+openpyxl>=3.1.0
