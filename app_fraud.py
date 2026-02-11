@@ -482,7 +482,7 @@ def detect_red_flags(documents_data: Dict, structured_data: Dict, external_valid
     # 1. Entreprise récente avec salaires élevés
     if 'siret_validation' in external_validations:
         siret_info = external_validations['siret_validation']
-        if siret_info.get('exists') and siret_info.get('creation_date'):
+        if siret_info and siret_info.get('exists') and siret_info.get('creation_date'):
             try:
                 creation_year = int(siret_info['creation_date'][:4])
                 current_year = datetime.now().year
@@ -554,6 +554,8 @@ def detect_red_flags(documents_data: Dict, structured_data: Dict, external_valid
         home = external_validations['address_home']
         work = external_validations['address_work']
         
+        if home and work and home.get('latitude') and work.get('latitude'):
+        
         if home.get('latitude') and work.get('latitude'):
             distance = calculate_distance(
                 home['latitude'], home['longitude'],
@@ -598,7 +600,7 @@ def detect_red_flags(documents_data: Dict, structured_data: Dict, external_valid
     # 6. Entreprise radiée/fermée
     if 'siret_validation' in external_validations:
         siret_info = external_validations['siret_validation']
-        if siret_info.get('status') == 'Fermée':
+        if siret_info and siret_info.get('status') == 'Fermée':
             red_flags.append({
                 'severity': 'critical',
                 'category': 'Entreprise',
