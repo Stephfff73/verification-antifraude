@@ -1532,7 +1532,7 @@ def page_accueil():
     • API Data.gouv pour validation adresses<br>
     • Vérification DNS pour emails<br>
     • Calculs géographiques domicile-travail<br>
-    • Système expert de Red Flags (15+ signaux)
+    • Système expert de Red Flags avec + de 15 signaux
     </div>
     """, unsafe_allow_html=True)
     st.markdown("""
