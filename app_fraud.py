@@ -913,7 +913,7 @@ def page_accueil():
         <div class="metric-card">
             <h2 style="color: #f59e0b;">3️⃣</h2>
             <h4>Décision éclairée</h4>
-            <p>Edition d'un rapport détaillé avec recommandation d'action pour faciliter la prise de décision</p>
+            <p>Edition d'un rapport détaillé avec recommandation d'action pour faciliter la décision</p>
         </div>
         """, unsafe_allow_html=True)
     
