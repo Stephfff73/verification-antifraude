@@ -1611,7 +1611,7 @@ def page_accueil():
     # KPIs
     st.markdown("### 📈 Performances du système")
     
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3 = st.columns(3)
     
     with col1:
         st.markdown("""
@@ -1636,18 +1636,11 @@ def page_accueil():
         <div class="metric-card">
             <h3 style="color: #f59e0b;">94.5%</h3>
             <p><strong>Red Flags</strong></p>
-            <small>15+ signaux experts</small>
+            <small>Analyse de plus de 15 signaux</small>
         </div>
         """, unsafe_allow_html=True)
     
-    with col4:
-        st.markdown("""
-        <div class="metric-card">
-            <h3 style="color: #ef4444;">-60%</h3>
-            <p><strong>Faux positifs</strong></p>
-            <small>Grâce aux validations</small>
-        </div>
-        """, unsafe_allow_html=True)
+
     
     st.markdown("---")
     st.info("💡 **Commencez par télécharger les documents** pour lancer une analyse complète avec validations externes !")
