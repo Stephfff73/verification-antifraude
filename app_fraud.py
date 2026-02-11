@@ -928,7 +928,7 @@ def page_accueil():
         st.markdown("""
         <div class="metric-card">
             <h3 style="color: #3b82f6;">98.5%</h3>
-            <p><strong>Précision métadonnées</strong></p>
+            <p><strong>Métadonnées</strong></p>
             <small>Détection éditeurs suspects</small>
         </div>
         """, unsafe_allow_html=True)
