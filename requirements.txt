@@ -14,3 +14,8 @@ plotly>=5.18.0
 
 # Excel export
 openpyxl>=3.1.0
+
+# Nouveaux packages requis :
+requests>=2.31.0      # Pour appels API
+dnspython>=2.4.0      # Pour validation emails (DNS check)
+geopy>=2.4.0          # Pour calculs distance géographique
