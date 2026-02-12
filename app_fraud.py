@@ -342,6 +342,10 @@ def extract_french_addresses_ultra(text: str) -> List[Dict]:
         if not validate_french_postal_code(code_postal):
             continue
         
+        # NETTOYAGE de la ville (enlever métadonnées parasites)
+        ville = re.split(r'\s+(Matricule|Code|N°|Tel|Telephone|Fax|Email|Classification|Catégorie|Poste|Ancienneté|Date|Cadre|Manager|Business|Data|Analyst)', ville, flags=re.IGNORECASE)[0]
+        ville = ville.strip(' ,.')
+        
         # Regarder AVANT le code postal pour trouver numéro + type voie + nom voie
         text_before = text_clean[max(0, pm.start()-200):pm.start()]
         
@@ -1224,50 +1228,93 @@ def perform_external_validations(documents_data: Dict, structured_data: Dict) ->
         # Valider le premier SIRET trouvé
         validations['siret_validation'] = validate_siret_insee(unique_sirets[0])
 
-    # 2. Validation adresses DOMICILE
-    all_home_addresses = []
+    # 2. Validation adresses - LOGIQUE INTELLIGENTE
+    # Stratégie : Séparer les adresses en fonction du contexte et du SIRET
+    
+    all_addresses_with_context = []
+    
     for doc_key, data in structured_data.items():
-        if 'piece_identite' in doc_key or 'quittance' in doc_key:
-            addresses_detailed = data.get('addresses_detailed', [])
-            for addr in addresses_detailed:
-                if isinstance(addr, dict):
-                    all_home_addresses.append(addr['full_address'])
-
-    if all_home_addresses:
-        # Prendre l'adresse avec la meilleure confiance
-        best_home = None
-        for doc_key, data in structured_data.items():
-            if 'piece_identite' in doc_key or 'quittance' in doc_key:
-                addresses_detailed = data.get('addresses_detailed', [])
-                if addresses_detailed and isinstance(addresses_detailed[0], dict):
-                    if not best_home or addresses_detailed[0].get('confidence', 0) > best_home.get('confidence', 0):
-                        best_home = addresses_detailed[0]
-
-        if best_home:
-            validations['address_home'] = validate_address_gouv(best_home['full_address'])
-
+        addresses_detailed = data.get('addresses_detailed', [])
+        doc_sirets = data.get('siret', [])
+        
+        for addr in addresses_detailed:
+            if isinstance(addr, dict):
+                all_addresses_with_context.append({
+                    'address': addr,
+                    'doc_key': doc_key,
+                    'has_siret': len(doc_sirets) > 0,
+                    'full_address': addr['full_address']
+                })
+    
+    # Classifier les adresses
+    enterprise_addresses = []
+    home_addresses = []
+    
+    # Si on a validé un SIRET, on peut comparer les adresses
+    validated_siret_address = None
+    if validations['siret_validation'] and validations['siret_validation'].get('address'):
+        validated_siret_address = validations['siret_validation']['address'].lower()
+    
+    for addr_context in all_addresses_with_context:
+        addr = addr_context['address']
+        addr_text = addr['full_address'].lower()
+        
+        # L'adresse est-elle proche de l'adresse SIRET validée ?
+        is_enterprise_address = False
+        
+        if validated_siret_address:
+            # Comparer code postal et début de rue
+            cp = addr.get('code_postal', '')
+            if cp and cp in validated_siret_address:
+                # Même code postal que l'entreprise
+                is_enterprise_address = True
+            
+            # Ou si très similaire (même rue par exemple)
+            addr_parts = addr_text.split(',')[0] if ',' in addr_text else addr_text
+            if addr_parts in validated_siret_address or validated_siret_address in addr_text:
+                is_enterprise_address = True
+        
+        # Si le document contient un SIRET, c'est probablement l'adresse entreprise
+        if addr_context['has_siret']:
+            is_enterprise_address = True
+        
+        if is_enterprise_address:
+            enterprise_addresses.append(addr)
+        else:
+            home_addresses.append(addr)
+    
+    # Si aucune classification n'a fonctionné, utiliser une heuristique simple
+    if not home_addresses and not enterprise_addresses:
+        # Prendre toutes les adresses qui ne sont PAS l'adresse du SIRET
+        for addr_context in all_addresses_with_context:
+            addr = addr_context['address']
+            
+            if validated_siret_address:
+                addr_text = addr['full_address'].lower()
+                addr_cp = addr.get('code_postal', '')
+                
+                # Si code postal différent de l'entreprise, c'est probablement le domicile
+                if addr_cp and addr_cp not in validated_siret_address:
+                    home_addresses.append(addr)
+                else:
+                    enterprise_addresses.append(addr)
+            else:
+                # Pas de SIRET validé : impossible de classifier intelligemment
+                # On met tout en "adresses trouvées mais non classifiées"
+                home_addresses.append(addr)
+    
+    # Prendre la meilleure adresse domicile
+    if home_addresses:
+        best_home = max(home_addresses, key=lambda x: x.get('confidence', 0))
+        validations['address_home'] = validate_address_gouv(best_home['full_address'])
+    
     # 3. Validation adresses ENTREPRISE
-    all_work_addresses = []
-    for doc_key, data in structured_data.items():
-        if 'contrat_travail' in doc_key or 'fiche_paie' in doc_key:
-            addresses_detailed = data.get('addresses_detailed', [])
-            for addr in addresses_detailed:
-                if isinstance(addr, dict):
-                    all_work_addresses.append(addr['full_address'])
-
-    validations['extraction_stats']['total_addresses_found'] = len(all_home_addresses) + len(all_work_addresses)
-
-    if all_work_addresses:
-        best_work = None
-        for doc_key, data in structured_data.items():
-            if 'contrat_travail' in doc_key or 'fiche_paie' in doc_key:
-                addresses_detailed = data.get('addresses_detailed', [])
-                if addresses_detailed and isinstance(addresses_detailed[0], dict):
-                    if not best_work or addresses_detailed[0].get('confidence', 0) > best_work.get('confidence', 0):
-                        best_work = addresses_detailed[0]
-
-        if best_work:
-            validations['address_work'] = validate_address_gouv(best_work['full_address'])
+    if enterprise_addresses:
+        best_work = max(enterprise_addresses, key=lambda x: x.get('confidence', 0))
+        validations['address_work'] = validate_address_gouv(best_work['full_address'])
+    
+    # Stats d'extraction
+    validations['extraction_stats']['total_addresses_found'] = len(home_addresses) + len(enterprise_addresses)
 
     # 4. Calcul distance géographique
     if (validations['address_home'] and validations['address_home'].get('latitude') and
@@ -2208,7 +2255,7 @@ def page_accueil():
     with col1:
         st.markdown("""
         **🏢 SIRET/SIREN**
-        - 15 patterns différents
+        - + de 15 patterns différents
         - Espaces, points, tirets
         - Avec/sans labels
         - Validation Luhn
