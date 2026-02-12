@@ -2129,7 +2129,8 @@ def main():
             "📋 Navigation",
             ["🏠 Accueil", "📤 Télécharger Documents", "🔍 Analyse Individuelle",
              "🌐 Validations Externes", "🚨 Red Flags", "📊 Analyse Globale", "📑 Rapport Excel"],
-            index=0
+            index=0,
+            key="navigation_radio"
         )
 
         st.markdown("---")
@@ -2408,7 +2409,7 @@ def page_analyse_individuelle():
     doc_keys = list(documents.keys())
     doc_labels = [f"{key.replace('_', ' ').title()}" for key in doc_keys]
 
-    selected_label = st.selectbox("📄 Sélectionnez un document", doc_labels)
+    selected_label = st.selectbox("📄 Sélectionnez un document", doc_labels, key="doc_selector")
     selected_key = doc_keys[doc_labels.index(selected_label)]
 
     st.markdown("---")
