@@ -2099,7 +2099,7 @@ def main():
 
     st.markdown("""
     <div class="extraction-success">
-        <h4>🚀 NOUVEAUTÉS :</h4>
+        <h4>"🚀 NOUVEAUTÉS au 12/02/26 :"</h4>
         ✨ <strong>Extraction SIRET/SIREN</strong> : + 15 patterns différents (espaces, points, tirets, labels, etc.)<br>
         ✨ <strong>Extraction adresses françaises</strong> : Détection intelligente avec contexte sémantique<br>
         ✨ <strong>Emails & Téléphones</strong> : Validation DNS, détection emails jetables<br>
