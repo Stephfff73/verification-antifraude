@@ -330,7 +330,7 @@ def extract_french_addresses_ultra(text: str) -> List[Dict]:
     # ========== PATTERN 1 : Format complet avec code postal ==========
     # Ex: 12 rue Victor Hugo, 75001 Paris
     # Ex: 123 avenue des Champs-Élysées 75008 PARIS
-    pattern1 = r'\b(\d{1,4})\s+({voie})[,\s]+([A-ZÉÈÊÀÂa-zéèêàâ\s\-\']{3,50})[,\s]+(\d{{5}})\s+([A-ZÉÈÊÀÂa-zéèêàâ\s\-\']+)\b'.format(voie=voie_pattern)
+    pattern1 = r'\b(\d{{1,4}})\s+({voie})[,\s]+([A-ZÉÈÊÀÂa-zéèêàâ\s\-\']{{3,50}})[,\s]+(\d{{{{5}}}})\s+([A-ZÉÈÊÀÂa-zéèêàâ\s\-\']+)\b'.format(voie=voie_pattern)
 
     for match in re.finditer(pattern1, text_clean, re.IGNORECASE):
         numero = match.group(1)
@@ -353,7 +353,7 @@ def extract_french_addresses_ultra(text: str) -> List[Dict]:
 
     # ========== PATTERN 2 : Format avec virgule entre voie et CP ==========
     # Ex: 45 boulevard Saint-Germain, 75005 Paris
-    pattern2 = r'\b(\d{1,4})\s+({voie})\s+([A-ZÉÈÊÀÂa-zéèêàâ\s\-\']+),\s*(\d{{5}})\s+([A-ZÉÈÊÀÂa-zéèêàâ\s\-\']+)\b'.format(voie=voie_pattern)
+    pattern2 = r'\b(\d{{1,4}})\s+({voie})\s+([A-ZÉÈÊÀÂa-zéèêàâ\s\-\']+),\s*(\d{{{{5}}}})\s+([A-ZÉÈÊÀÂa-zéèêàâ\s\-\']+)\b'.format(voie=voie_pattern)
 
     for match in re.finditer(pattern2, text_clean, re.IGNORECASE):
         numero = match.group(1)
@@ -378,7 +378,7 @@ def extract_french_addresses_ultra(text: str) -> List[Dict]:
 
     # ========== PATTERN 3 : Format sans virgule ==========
     # Ex: 10 rue de la Paix 75002 Paris
-    pattern3 = r'\b(\d{1,4})\s+({voie})\s+([A-ZÉÈÊÀÂa-zéèêàâ\s\-\']+?)\s+(\d{{5}})\s+([A-ZÉÈÊÀÂa-zéèêàâ\s\-\']+)\b'.format(voie=voie_pattern)
+    pattern3 = r'\b(\d{{1,4}})\s+({voie})\s+([A-ZÉÈÊÀÂa-zéèêàâ\s\-\']+?)\s+(\d{{{{5}}}})\s+([A-ZÉÈÊÀÂa-zéèêàâ\s\-\']+)\b'.format(voie=voie_pattern)
 
     for match in re.finditer(pattern3, text_clean, re.IGNORECASE):
         numero = match.group(1)
@@ -404,7 +404,7 @@ def extract_french_addresses_ultra(text: str) -> List[Dict]:
     context_keywords = ['adresse', 'domicile', 'résidence', 'demeurant', 'domicilié', 'situé', 'sis']
     context_pattern = '|'.join(context_keywords)
 
-    pattern4 = r'(?:{context})[\s:]+(\d{{1,4}})\s+({voie})\s+([A-ZÉÈÊÀÂa-zéèêàâ\s\-\']+?)\s+(\d{{5}})\s+([A-ZÉÈÊÀÂa-zéèêàâ\s\-\']+)'.format(
+    pattern4 = r'(?:{context})[\s:]+(\d{{{{1,4}}}})\s+({voie})\s+([A-ZÉÈÊÀÂa-zéèêàâ\s\-\']+?)\s+(\d{{{{{{5}}}}}})\s+([A-ZÉÈÊÀÂa-zéèêàâ\s\-\']+)'.format(
         context=context_pattern,
         voie=voie_pattern
     )
@@ -432,7 +432,7 @@ def extract_french_addresses_ultra(text: str) -> List[Dict]:
 
     # ========== PATTERN 5 : Multi-lignes (avec \n conservé) ==========
     # Pour les PDF où l'adresse est sur plusieurs lignes
-    pattern5 = r'(\d{1,4})\s+({voie})\s+([A-ZÉÈÊÀÂa-zéèêàâ\s\-\']+)[\n\r\s]+(\d{{5}})\s+([A-ZÉÈÊÀÂa-zéèêàâ\s\-\']+)'.format(voie=voie_pattern)
+    pattern5 = r'(\d{{1,4}})\s+({voie})\s+([A-ZÉÈÊÀÂa-zéèêàâ\s\-\']+)[\n\r\s]+(\d{{{{5}}}})\s+([A-ZÉÈÊÀÂa-zéèêàâ\s\-\']+)'.format(voie=voie_pattern)
 
     for match in re.finditer(pattern5, text, re.IGNORECASE):
         numero = match.group(1)
@@ -2768,6 +2768,10 @@ def page_rapport():
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True
             )
+
+
+if __name__ == "__main__":
+    main()
 
 
 if __name__ == "__main__":
