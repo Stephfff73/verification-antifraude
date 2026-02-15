@@ -4,6 +4,9 @@
 # ============================================
 
 
+# Dépendances pour l'application Anti-Fraude Documentaire
+# Optimisé pour Streamlit Cloud (limite mémoire 1GB)
+
 # Framework principal
 streamlit>=1.28.0
 
@@ -17,8 +20,7 @@ PyPDF2>=3.0.0
 # Traitement images
 Pillow>=10.0.0
 
-# OCR (Optical Character Recognition)
-easyocr>=1.7.0
+# OCR (Tesseract seulement - EasyOCR trop gourmand pour Cloud)
 pytesseract>=0.3.10
 
 # Requêtes HTTP pour API externes
@@ -29,3 +31,7 @@ geopy>=2.4.0
 
 # Validation DNS
 dnspython>=2.4.0
+
+# Note : EasyOCR est désactivé car il nécessite ~2GB RAM
+# Pour l'utiliser en LOCAL, installer manuellement : pip install easyocr
+# Puis décommenter la section EasyOCR dans app_fraud.py
