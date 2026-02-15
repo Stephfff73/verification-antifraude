@@ -30,6 +30,17 @@ dnspython>=2.4.0
 # Export Excel
 openpyxl>=3.1.0
 
+# RECOMMANDÉ : EasyOCR (meilleur pour français)
+pip install easyocr
+
+# OPTIONNEL : Tesseract (fallback)
+# Windows : https://github.com/UB-Mannheim/tesseract/wiki
+# Linux : sudo apt-get install tesseract-ocr tesseract-ocr-fra
+# Mac : brew install tesseract tesseract-lang
+pip install pytesseract
+
+# Autres dépendances (déjà présentes)
+pip install Pillow numpy
 
 # ===== OPTIONAL DEPENDENCIES (OPTIONNELLES) =====
 
@@ -42,7 +53,6 @@ openpyxl>=3.1.0
 #
 # Installation standard (sans OCR) :
 #   pip install -r requirements.txt --break-system-packages
-pip install easyocr
 #
 # Installation avec OCR :
 #   1. Installer Tesseract sur votre système :
