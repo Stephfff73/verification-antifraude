@@ -1,3 +1,4 @@
+
 """
 🔍 IN'LI - SYSTÈME EXPERT DE DÉTECTION DE FRAUDE DOCUMENTAIRE
 Application Streamlit avec validation externe multi-sources
@@ -2014,9 +2015,21 @@ def perform_external_validations(documents_data: Dict, structured_data: Dict) ->
     
     # Séparer par type
     for addr in classified:
-        if addr.get('type') == 'entreprise':
+        addr_type = addr.get('type', 'inconnu')
+        
+        # Sécurité : vérifier aussi directement le CP si type inconnu
+        if addr_type == 'inconnu' and validated_siret_address:
+            addr_cp = addr.get('code_postal', '')
+            siret_cp_match = re.search(r'\b(\d{5})\b', validated_siret_address)
+            if siret_cp_match and addr_cp == siret_cp_match.group(1):
+                addr_type = 'entreprise'
+                addr['type'] = 'entreprise'
+                addr['classification_reason'] = 'CP identique SIRET (fallback)'
+                addr['classification_confidence'] = 0.9
+        
+        if addr_type == 'entreprise':
             enterprise_addresses.append(addr)
-        elif addr.get('type') == 'domicile':
+        elif addr_type == 'domicile':
             home_addresses.append(addr)
     
     # DEBUG Classification
