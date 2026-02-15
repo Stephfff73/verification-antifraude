@@ -149,6 +149,671 @@ if 'external_validations' not in st.session_state:
 # EXTRACTION ULTRA-ROBUSTE DE DONNÉES
 # ======================
 
+
+# ========== IMPORTS SUPPLÉMENTAIRES ==========
+import cv2
+import numpy as np
+import unicodedata
+from typing import List, Dict, Tuple, Optional
+
+
+# ==========================================
+# MODULE OCR ROBUSTE
+# ==========================================
+
+"""
+Module d'extraction texte avec OCR ROBUSTE
+Prétraitement OpenCV + EasyOCR optimisé pour CNI/documents administratifs
+"""
+
+
+
+def preprocess_image_opencv(img_array):
+    """
+    Prétraitement OpenCV COMPLET pour OCR sur documents administratifs (CNI, fiches paie)
+    
+    Étapes critiques :
+    1. Conversion niveaux de gris
+    2. Correction orientation (détection angle)
+    3. Binarisation adaptative (gère fond texturé)
+    4. Suppression bruit
+    5. Augmentation contraste
+    """
+    
+    # 1. Conversion niveaux de gris
+    if len(img_array.shape) == 3:
+        gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+    else:
+        gray = img_array
+    
+    # 2. Correction d'orientation (détection et rotation auto)
+    # Détecte les lignes de texte pour calculer l'angle de skew
+    coords = np.column_stack(np.where(gray > 0))
+    if len(coords) > 0:
+        angle = cv2.minAreaRect(coords)[-1]
+        if angle < -45:
+            angle = -(90 + angle)
+        else:
+            angle = -angle
+        
+        # Rotation si nécessaire (>0.5 degré)
+        if abs(angle) > 0.5:
+            (h, w) = gray.shape[:2]
+            center = (w // 2, h // 2)
+            M = cv2.getRotationMatrix2D(center, angle, 1.0)
+            gray = cv2.warpAffine(gray, M, (w, h), 
+                                  flags=cv2.INTER_CUBIC, 
+                                  borderMode=cv2.BORDER_REPLICATE)
+    
+    # 3. Augmentation contraste (CLAHE - adaptatif)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+    enhanced = clahe.apply(gray)
+    
+    # 4. Suppression du bruit (median blur - préserve les contours)
+    denoised = cv2.medianBlur(enhanced, 3)
+    
+    # 5. Binarisation adaptative (gère fond texturé CNI)
+    # Adaptive Gaussian mieux que simple threshold pour documents complexes
+    binary = cv2.adaptiveThreshold(
+        denoised,
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        11,  # taille bloc
+        2    # constante soustraite
+    )
+    
+    # 6. Morphologie : fermeture pour connecter caractères fragmentés
+    kernel = np.ones((2,2), np.uint8)
+    morphed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+    
+    return morphed
+
+
+def extract_text_from_image(image_file):
+    """
+    Extraction texte d'image avec OCR ROBUSTE
+    
+    Pipeline :
+    1. Chargement image
+    2. Prétraitement OpenCV complet
+    3. OCR EasyOCR (meilleur pour CNI/docs administratifs)
+    4. Fallback Tesseract avec psm adapté
+    """
+    try:
+        # Charger image
+        img = Image.open(image_file)
+        img_array = np.array(img)
+        width, height = img.size
+        
+        # Prétraitement OpenCV
+        preprocessed = preprocess_image_opencv(img_array)
+        
+        extracted_text = None
+        ocr_method = None
+        
+        # ========== MÉTHODE 1 : EasyOCR (OPTIMAL pour documents administratifs) ==========
+        try:
+            import easyocr
+            
+            # Initialiser reader (cache via session_state)
+            if 'easyocr_reader' not in st.session_state:
+                # gpu=False pour compatibilité Cloud
+                # lang=['fr','en'] pour documents mixtes
+                st.session_state.easyocr_reader = easyocr.Reader(
+                    ['fr', 'en'], 
+                    gpu=False,
+                    verbose=False
+                )
+            
+            reader = st.session_state.easyocr_reader
+            
+            # OCR sur image prétraitée
+            result = reader.readtext(preprocessed, detail=0, paragraph=False)
+            
+            # Reconstruction texte avec structure
+            extracted_text = '\n'.join(result)
+            ocr_method = "EasyOCR (prétraité)"
+            
+            if len(extracted_text) > 30:
+                return extracted_text, None
+        
+        except ImportError:
+            pass  # EasyOCR pas installé, passer au fallback
+        except Exception as e:
+            st.warning(f"⚠️ EasyOCR échoué : {str(e)[:100]}")
+        
+        # ========== MÉTHODE 2 : Tesseract avec PSM adapté (FALLBACK) ==========
+        try:
+            import pytesseract
+            
+            # Convertir numpy array en PIL Image pour pytesseract
+            pil_preprocessed = Image.fromarray(preprocessed)
+            
+            # PSM (Page Segmentation Mode) adapté :
+            # PSM 6 = assume a single uniform block of text (CNI)
+            # PSM 11 = sparse text, find as much text as possible (fiche paie)
+            
+            # Essayer PSM 6 d'abord (documents structurés)
+            try:
+                custom_config = r'--oem 3 --psm 6 -l fra'
+                extracted_text = pytesseract.image_to_string(pil_preprocessed, config=custom_config)
+                
+                # Si résultat insuffisant, essayer PSM 11
+                if len(extracted_text) < 30:
+                    custom_config = r'--oem 3 --psm 11 -l fra'
+                    extracted_text = pytesseract.image_to_string(pil_preprocessed, config=custom_config)
+            
+            except:
+                # Fallback anglais si français pas disponible
+                custom_config = r'--oem 3 --psm 6 -l eng'
+                extracted_text = pytesseract.image_to_string(pil_preprocessed, config=custom_config)
+            
+            ocr_method = "Tesseract (prétraité, psm adapté)"
+            
+            if extracted_text and len(extracted_text) > 30:
+                return extracted_text, None
+        
+        except ImportError:
+            pass
+        except Exception as e:
+            st.warning(f"⚠️ Tesseract échoué : {str(e)[:100]}")
+        
+        # ========== ÉCHEC TOTAL ==========
+        if extracted_text and len(extracted_text) > 10:
+            return extracted_text, f"⚠️ OCR partiel via {ocr_method} ({width}x{height}px)"
+        
+        return None, f"""
+📷 **Image détectée** ({width}x{height}px)
+
+❌ **OCR non disponible**
+
+**Pour installer EasyOCR (RECOMMANDÉ) :**
+```bash
+pip install easyocr opencv-python
+```
+
+**Ou Tesseract :**
+- Créer `packages.txt` avec :
+```
+tesseract-ocr
+tesseract-ocr-fra
+```
+
+**Alternative :** Scanner avec app mobile (CamScanner, Adobe Scan) → PDF
+"""
+    
+    except Exception as e:
+        return None, f"❌ Erreur : {str(e)}"
+
+
+# ==========================================
+# MODULE CLASSIFICATION CONTEXTUELLE
+# ==========================================
+
+"""
+Module de classification contextuelle d'adresses
+Analyse sémantique pour distinguer domicile vs entreprise
+"""
+
+
+
+def classify_address_contextual(address: Dict, context_lines: List[str], all_addresses: List[Dict], siret_address: str = None) -> Tuple[str, str, float]:
+    """
+    Classification contextuelle intelligente d'une adresse
+    
+    Args:
+        address: Dict avec 'full_address', 'code_postal', 'nom_voie', etc.
+        context_lines: Liste des lignes de texte autour de l'adresse (avant/après)
+        all_addresses: Liste de toutes les adresses extraites (pour comparaison)
+        siret_address: Adresse validée du SIRET (si disponible)
+    
+    Returns:
+        (type, reason, confidence)
+        type: 'domicile', 'entreprise', 'inconnu'
+        reason: Explication du choix
+        confidence: Score 0-1
+    """
+    
+    addr_text = address['full_address'].lower()
+    addr_cp = address.get('code_postal', '')
+    
+    # ========== RÈGLE 1 : Détection domicile par civilité ==========
+    # Si ligne précédente contient civilité → domicile
+    civilite_keywords = [
+        r'\bm\.\s',  # M.
+        r'\bmme\b',  # Mme
+        r'\bmlle\b',  # Mlle
+        r'\bmonsieur\b',
+        r'\bmadame\b',
+        r'\bmademoiselle\b'
+    ]
+    
+    for i, line in enumerate(context_lines):
+        line_lower = line.lower()
+        
+        for pattern in civilite_keywords:
+            if re.search(pattern, line_lower):
+                # Vérifier si l'adresse est dans les 2 lignes suivantes
+                if i < len(context_lines) - 2:
+                    next_lines = ' '.join(context_lines[i:i+3]).lower()
+                    if addr_text[:20] in next_lines or addr_cp in next_lines:
+                        return (
+                            'domicile',
+                            f"Civilité détectée ligne {i}: '{line[:50]}'",
+                            0.9
+                        )
+    
+    # ========== RÈGLE 2 : Détection entreprise par raison sociale / SIRET ==========
+    entreprise_keywords = [
+        'siret', 'siren', 'rcs', 'sarl', 'sas', 'sa ', 'eurl', 'sci',
+        'société', 'entreprise', 'établissement', 'raison sociale',
+        'tva', 'capital', 'ape', 'naf'
+    ]
+    
+    for i, line in enumerate(context_lines):
+        line_lower = line.lower()
+        
+        for keyword in entreprise_keywords:
+            if keyword in line_lower:
+                # Vérifier proximité avec l'adresse
+                if i < len(context_lines) - 3:
+                    next_lines = ' '.join(context_lines[i:i+4]).lower()
+                    if addr_text[:20] in next_lines or addr_cp in next_lines:
+                        return (
+                            'entreprise',
+                            f"Mot-clé entreprise détecté: '{keyword}' (ligne {i})",
+                            0.85
+                        )
+    
+    # ========== RÈGLE 3 : Comparaison avec adresse SIRET validée ==========
+    if siret_address:
+        siret_lower = siret_address.lower()
+        siret_cp_match = re.search(r'\b(\d{5})\b', siret_lower)
+        
+        if siret_cp_match:
+            siret_cp = siret_cp_match.group(1)
+            
+            # Même code postal que SIRET
+            if addr_cp == siret_cp:
+                return (
+                    'entreprise',
+                    f"Même code postal que SIRET ({addr_cp})",
+                    0.95
+                )
+            
+            # Code postal différent
+            elif addr_cp and addr_cp != siret_cp:
+                return (
+                    'domicile',
+                    f"Code postal différent du SIRET ({addr_cp} ≠ {siret_cp})",
+                    0.85
+                )
+            
+            # Même nom de rue
+            addr_rue = address.get('nom_voie', '').lower()
+            if addr_rue and len(addr_rue) > 5:
+                # Normaliser pour comparaison
+                addr_rue_clean = re.sub(r'[^a-z0-9]', '', addr_rue)
+                siret_clean = re.sub(r'[^a-z0-9]', '', siret_lower)
+                
+                if addr_rue_clean in siret_clean:
+                    return (
+                        'entreprise',
+                        f"Même rue que SIRET ({addr_rue})",
+                        0.95
+                    )
+    
+    # ========== RÈGLE 4 : Heuristique position dans document ==========
+    # Si plusieurs adresses, celle en haut = entreprise, celle en bas = domicile
+    if len(all_addresses) >= 2:
+        addr_index = next((i for i, a in enumerate(all_addresses) if a['full_address'] == address['full_address']), -1)
+        
+        if addr_index == 0:
+            # Première adresse du document
+            return (
+                'entreprise',
+                "Première adresse du document (position typique employeur)",
+                0.6
+            )
+        elif addr_index == len(all_addresses) - 1:
+            # Dernière adresse
+            return (
+                'domicile',
+                "Dernière adresse du document (position typique salarié)",
+                0.6
+            )
+    
+    # ========== RÈGLE 5 : Détection par mots-clés dans l'adresse elle-même ==========
+    # Certaines adresses contiennent des indices
+    if any(word in addr_text for word in ['siege', 'siège', 'direction', 'bureau', 'tour', 'immeuble']):
+        return (
+            'entreprise',
+            "Mot-clé entreprise dans l'adresse (siège, bureau, tour...)",
+            0.75
+        )
+    
+    # ========== RÈGLE 6 : Par défaut - inconnu ==========
+    return (
+        'inconnu',
+        "Pas assez d'indices contextuels",
+        0.3
+    )
+
+
+def extract_context_lines(text: str, address: str, window: int = 5) -> List[str]:
+    """
+    Extraire les lignes de contexte autour d'une adresse
+    
+    Args:
+        text: Texte complet du document
+        address: Adresse à rechercher
+        window: Nombre de lignes avant/après
+    
+    Returns:
+        Liste des lignes de contexte
+    """
+    lines = text.split('\n')
+    
+    # Trouver la ligne contenant l'adresse
+    addr_short = address[:30].lower()
+    
+    for i, line in enumerate(lines):
+        if addr_short in line.lower():
+            # Retourner fenêtre de contexte
+            start = max(0, i - window)
+            end = min(len(lines), i + window + 1)
+            return lines[start:end]
+    
+    # Si pas trouvé, retourner lignes vides
+    return []
+
+
+def classify_all_addresses(addresses: List[Dict], full_text: str, siret_address: str = None) -> List[Dict]:
+    """
+    Classifier toutes les adresses d'un document
+    
+    Args:
+        addresses: Liste des adresses extraites
+        full_text: Texte complet du document
+        siret_address: Adresse SIRET validée
+    
+    Returns:
+        Liste des adresses avec classification ajoutée
+    """
+    classified = []
+    
+    for addr in addresses:
+        # Extraire contexte
+        context = extract_context_lines(full_text, addr['full_address'], window=5)
+        
+        # Classifier
+        addr_type, reason, confidence = classify_address_contextual(
+            addr, 
+            context, 
+            addresses, 
+            siret_address
+        )
+        
+        # Ajouter métadonnées
+        addr['type'] = addr_type
+        addr['classification_reason'] = reason
+        addr['classification_confidence'] = confidence
+        
+        classified.append(addr)
+    
+    return classified
+
+
+# ==========================================
+# MODULE VALIDATION API SMART
+# ==========================================
+
+"""
+Module de validation API avec normalisation intelligente
+Gestion scores de confiance et interprétation robuste des réponses
+"""
+
+
+
+def normalize_address(address: str) -> str:
+    """
+    Normalisation d'adresse pour améliorer matching API
+    
+    Transformations :
+    - Majuscules
+    - Suppression accents
+    - Normalisation espaces
+    - Suppression ponctuation superflue
+    """
+    # Supprimer accents
+    nfkd = unicodedata.normalize('NFKD', address)
+    without_accents = ''.join([c for c in nfkd if not unicodedata.combining(c)])
+    
+    # Majuscules
+    upper = without_accents.upper()
+    
+    # Normaliser espaces multiples
+    normalized_spaces = re.sub(r'\s+', ' ', upper)
+    
+    # Supprimer ponctuation superflue (garder virgules et tirets)
+    cleaned = re.sub(r'[^\w\s,\-]', '', normalized_spaces)
+    
+    return cleaned.strip()
+
+
+def validate_address_gouv_smart(address: str) -> Dict:
+    """
+    Validation adresse via API Data.gouv avec normalisation et interprétation intelligente
+    
+    Améliorations :
+    - Normalisation avant envoi
+    - Interprétation score de confiance (>0.7 = validé, >0.5 = acceptable, <0.5 = rejeté)
+    - Gestion erreurs réseau
+    - Retry automatique
+    """
+    result = {
+        'valid': False,
+        'normalized_address': None,
+        'latitude': None,
+        'longitude': None,
+        'confidence_score': 0,
+        'city': None,
+        'postal_code': None,
+        'error': None,
+        'api_used': 'API Adresse Data.gouv',
+        'interpretation': None
+    }
+    
+    if not address or len(address) < 5:
+        result['error'] = "Adresse trop courte"
+        return result
+    
+    # Normaliser l'adresse
+    normalized = normalize_address(address)
+    
+    try:
+        url = "https://api-adresse.data.gouv.fr/search/"
+        
+        # Tentative 1 : Adresse complète
+        response = requests.get(
+            url,
+            params={'q': normalized, 'limit': 1},
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            
+            if data.get('features') and len(data['features']) > 0:
+                feature = data['features'][0]
+                properties = feature['properties']
+                geometry = feature['geometry']
+                
+                score = properties.get('score', 0)
+                
+                # INTERPRÉTATION INTELLIGENTE du score
+                if score >= 0.7:
+                    # Score excellent → Validé
+                    result['valid'] = True
+                    result['interpretation'] = "Validée (score excellent)"
+                elif score >= 0.5:
+                    # Score acceptable → Validé avec réserve
+                    result['valid'] = True
+                    result['interpretation'] = "Validée (score acceptable)"
+                else:
+                    # Score faible → Non validé mais info disponible
+                    result['valid'] = False
+                    result['interpretation'] = f"Score trop faible ({score:.0%})"
+                
+                result['normalized_address'] = properties.get('label', address)
+                result['confidence_score'] = score
+                result['city'] = properties.get('city', '')
+                result['postal_code'] = properties.get('postcode', '')
+                
+                if geometry and geometry.get('coordinates'):
+                    result['longitude'] = geometry['coordinates'][0]
+                    result['latitude'] = geometry['coordinates'][1]
+            
+            else:
+                # Aucun résultat → Tentative 2 avec simplification
+                # Essayer avec juste code postal + ville
+                cp_ville_match = re.search(r'(\d{5})\s+([\w\s]+)$', normalized)
+                if cp_ville_match:
+                    cp = cp_ville_match.group(1)
+                    ville = cp_ville_match.group(2).strip()
+                    
+                    response2 = requests.get(
+                        url,
+                        params={'q': f"{cp} {ville}", 'limit': 1},
+                        timeout=10
+                    )
+                    
+                    if response2.status_code == 200:
+                        data2 = response2.json()
+                        if data2.get('features'):
+                            feature = data2['features'][0]
+                            properties = feature['properties']
+                            
+                            result['valid'] = True
+                            result['interpretation'] = "Validée (CP+ville seulement)"
+                            result['normalized_address'] = properties.get('label', address)
+                            result['confidence_score'] = properties.get('score', 0.5)
+                            result['city'] = properties.get('city', '')
+                            result['postal_code'] = properties.get('postcode', '')
+                            
+                            if feature['geometry'] and feature['geometry'].get('coordinates'):
+                                result['longitude'] = feature['geometry']['coordinates'][0]
+                                result['latitude'] = feature['geometry']['coordinates'][1]
+                        else:
+                            result['error'] = "Adresse introuvable (même avec CP+ville)"
+                else:
+                    result['error'] = "Adresse introuvable"
+        
+        elif response.status_code == 429:
+            result['error'] = "Trop de requêtes - Réessayez dans quelques secondes"
+        else:
+            result['error'] = f"Erreur API (code {response.status_code})"
+    
+    except requests.Timeout:
+        result['error'] = "Timeout - API non accessible"
+    except requests.RequestException as e:
+        result['error'] = f"Erreur réseau : {str(e)[:100]}"
+    except Exception as e:
+        result['error'] = f"Erreur : {str(e)[:100]}"
+    
+    return result
+
+
+def validate_siret_insee_smart(siret: str) -> Dict:
+    """
+    Validation SIRET via API avec gestion intelligente des réponses
+    """
+    result = {
+        'valid': False,
+        'exists': False,
+        'company_name': None,
+        'address': None,
+        'status': None,
+        'creation_date': None,
+        'activity': None,
+        'error': None,
+        'api_used': 'API Annuaire Entreprises'
+    }
+    
+    # Validation format
+    if not siret or not siret.isdigit() or len(siret) != 14:
+        result['error'] = "SIRET invalide (doit contenir 14 chiffres)"
+        return result
+    
+    try:
+        url = f"https://recherche-entreprises.api.gouv.fr/search?q={siret}"
+        
+        response = requests.get(url, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            
+            if data.get('results') and len(data['results']) > 0:
+                entreprise = data['results'][0]
+                
+                result['valid'] = True
+                result['exists'] = True
+                
+                # Nom
+                result['company_name'] = (
+                    entreprise.get('nom_complet') or 
+                    entreprise.get('nom_raison_sociale') or
+                    'Non renseigné'
+                )
+                
+                # Adresse du siège (normalisée)
+                siege = entreprise.get('siege', {})
+                if siege:
+                    parts = [
+                        siege.get('numero_voie', ''),
+                        siege.get('type_voie', ''),
+                        siege.get('libelle_voie', ''),
+                    ]
+                    rue = ' '.join([str(p) for p in parts if p]).strip().upper()
+                    
+                    cp = siege.get('code_postal', '')
+                    ville = siege.get('libelle_commune', '').upper()
+                    
+                    if rue and cp and ville:
+                        result['address'] = f"{rue}, {cp} {ville}"
+                    elif cp and ville:
+                        result['address'] = f"{cp} {ville}"
+                
+                # Statut
+                result['status'] = 'Actif' if entreprise.get('etat_administratif') == 'A' else 'Cessé'
+                
+                # Dates et activité
+                result['creation_date'] = entreprise.get('date_creation')
+                result['activity'] = f"NAF {entreprise.get('activite_principale')}" if entreprise.get('activite_principale') else None
+            
+            else:
+                result['error'] = "SIRET introuvable"
+        
+        elif response.status_code == 404:
+            result['error'] = "SIRET introuvable"
+        elif response.status_code == 429:
+            result['error'] = "Trop de requêtes"
+        else:
+            result['error'] = f"Erreur API (code {response.status_code})"
+    
+    except requests.Timeout:
+        result['error'] = "Timeout"
+    except Exception as e:
+        result['error'] = f"Erreur : {str(e)[:100]}"
+    
+    return result
+
+
+# ==========================================
+# RESTE DE L'APPLICATION
+# ==========================================
+
 def extract_siret_siren_ultra(text: str) -> Dict[str, List[str]]:
     """
     Extraction ULTRA-ROBUSTE de SIRET/SIREN - VERSION ULTRA-PERFORMANTE
@@ -430,9 +1095,13 @@ def extract_french_addresses_ultra(text: str) -> List[Dict]:
             type_voie = match1.group(2)
             nom_voie_part1 = match1.group(3).strip()
             
-            # FILTRE : Vérifier que le nom de voie ne contient pas "Matricule"
-            if re.search(r'Matricule|Code\s+employé|N°\s*employé', nom_voie_part1, re.IGNORECASE):
-                # Ce n'est pas un nom de voie, c'est une métadonnée
+            # NETTOYAGE DU NOM DE VOIE : Enlever "Matricule..." et tout ce qui suit
+            nom_voie_part1 = re.split(r'\s+(Matricule|Code\s+employé|N°\s*employé|Classification|Catégorie)', nom_voie_part1, flags=re.IGNORECASE)[0]
+            nom_voie_part1 = nom_voie_part1.strip()
+            
+            # Vérifier que le nom reste valide après nettoyage
+            if len(nom_voie_part1) < 3:
+                # Trop court après nettoyage, pas une vraie adresse
                 continue
             
             # Chercher code postal dans line2 ou line3
@@ -773,7 +1442,7 @@ API_CONFIG = {
 # VALIDATION SIRET (INSEE)
 # ======================
 
-def validate_siret_insee(siret: str) -> Dict:
+def validate_siret_insee_smart(siret: str) -> Dict:
     """
     Validation SIRET via API INSEE SIRENE (API publique)
     
@@ -876,7 +1545,7 @@ def validate_siret_insee(siret: str) -> Dict:
 # VALIDATION ADRESSE (DATA.GOUV)
 # ======================
 
-def validate_address_gouv(address: str) -> Dict:
+def validate_address_gouv_smart(address: str) -> Dict:
     """Validation adresse via API Adresse Data.gouv.fr (API publique gratuite)"""
 
     result = {
@@ -1297,7 +1966,7 @@ def perform_external_validations(documents_data: Dict, structured_data: Dict) ->
     if all_sirets:
         unique_sirets = list(set(all_sirets))
         # Valider le premier SIRET trouvé
-        validations['siret_validation'] = validate_siret_insee(unique_sirets[0])
+        validations['siret_validation'] = validate_siret_insee_smart(unique_sirets[0])
 
     # 2. Validation adresses - LOGIQUE INTELLIGENTE
     # Stratégie : Séparer les adresses en fonction du contexte et du SIRET
@@ -1317,79 +1986,52 @@ def perform_external_validations(documents_data: Dict, structured_data: Dict) ->
                     'full_address': addr['full_address']
                 })
     
-    # Classifier les adresses
+    # Classifier les adresses - VERSION CONTEXTUELLE
     enterprise_addresses = []
     home_addresses = []
     
-    # Si on a validé un SIRET, on peut comparer les adresses
+    # Récupérer texte complet pour analyse contextuelle
+    full_document_text = ""
+    for doc_key, doc_data in documents_data.items():
+        text_extract = doc_data.get('text_extract', '')
+        if text_extract:
+            full_document_text += text_extract + "\n\n"
+    
+    # Adresse SIRET validée
     validated_siret_address = None
     if validations['siret_validation'] and validations['siret_validation'].get('address'):
-        validated_siret_address = validations['siret_validation']['address'].lower()
+        validated_siret_address = validations['siret_validation']['address']
     
-    for addr_context in all_addresses_with_context:
-        addr = addr_context['address']
-        addr_text = addr['full_address'].lower()
-        addr_cp = addr.get('code_postal', '')
-        addr_rue = addr.get('nom_voie', '').lower()
-        
-        # L'adresse est-elle proche de l'adresse SIRET validée ?
-        is_enterprise_address = False
-        classification_reason = ""
-        
-        if validated_siret_address:
-            # RÈGLE 1 : Comparer le code postal
-            siret_cp_match = re.search(r'\b(\d{5})\b', validated_siret_address)
-            if siret_cp_match:
-                siret_cp = siret_cp_match.group(1)
-                
-                if addr_cp == siret_cp:
-                    # Même code postal = ENTREPRISE
-                    is_enterprise_address = True
-                    classification_reason = f"CP identique ({addr_cp} = {siret_cp})"
-                elif addr_cp != siret_cp and addr_cp:
-                    # Code postal DIFFÉRENT = DOMICILE
-                    is_enterprise_address = False
-                    classification_reason = f"CP différent ({addr_cp} ≠ {siret_cp})"
-            
-            # RÈGLE 2 : Comparer le nom de la rue (prioritaire sur CP si match exact)
-            if addr_rue and len(addr_rue) > 5:
-                # Normaliser pour comparaison
-                addr_rue_clean = re.sub(r'[^a-z0-9]', '', addr_rue)
-                siret_addr_clean = re.sub(r'[^a-z0-9]', '', validated_siret_address)
-                
-                if addr_rue_clean in siret_addr_clean:
-                    # Même rue = ENTREPRISE (override CP si différent)
-                    is_enterprise_address = True
-                    classification_reason = f"Même rue ({addr_rue})"
-        
-        # Classification finale
-        if is_enterprise_address:
+    # Extraire adresses simples
+    simple_addresses = [addr_ctx['address'] for addr_ctx in all_addresses_with_context]
+    
+    # CLASSIFICATION CONTEXTUELLE INTELLIGENTE
+    classified = classify_all_addresses(
+        addresses=simple_addresses,
+        full_text=full_document_text,
+        siret_address=validated_siret_address
+    )
+    
+    # Séparer par type
+    for addr in classified:
+        if addr.get('type') == 'entreprise':
             enterprise_addresses.append(addr)
-        else:
-            # Si on a un SIRET validé et que l'adresse n'est pas celle de l'entreprise
-            # C'est le DOMICILE
-            if validated_siret_address:
-                home_addresses.append(addr)
-                if not classification_reason:
-                    classification_reason = "Adresse différente de l'entreprise"
-            else:
-                # Pas de SIRET validé : on ne peut pas classifier
-                # On met dans domicile par défaut si le doc n'a pas de SIRET
-                if not addr_context['has_siret']:
-                    home_addresses.append(addr)
-                else:
-                    enterprise_addresses.append(addr)
+        elif addr.get('type') == 'domicile':
+            home_addresses.append(addr)
     
-    # DEBUG : Afficher la classification (peut être désactivé en prod)
-    import streamlit as st
-    with st.expander("🔍 DEBUG Classification Adresses"):
+    # DEBUG Classification
+    with st.expander("🔍 DEBUG Classification Contextuelle"):
         st.write(f"**SIRET validé :** {validated_siret_address}")
         st.write(f"**Adresses entreprise :** {len(enterprise_addresses)}")
         for addr in enterprise_addresses:
             st.write(f"  - {addr['full_address']} (CP: {addr.get('code_postal')})")
+            st.write(f"    Raison: {addr.get('classification_reason', 'N/A')}")
+            st.write(f"    Confiance: {addr.get('classification_confidence', 0):.0%}")
         st.write(f"**Adresses domicile :** {len(home_addresses)}")
         for addr in home_addresses:
             st.write(f"  - {addr['full_address']} (CP: {addr.get('code_postal')})")
+            st.write(f"    Raison: {addr.get('classification_reason', 'N/A')}")
+            st.write(f"    Confiance: {addr.get('classification_confidence', 0):.0%}")
     
     # Si aucune classification n'a fonctionné, utiliser une heuristique simple
     if not home_addresses and not enterprise_addresses:
@@ -1414,12 +2056,12 @@ def perform_external_validations(documents_data: Dict, structured_data: Dict) ->
     # Prendre la meilleure adresse domicile
     if home_addresses:
         best_home = max(home_addresses, key=lambda x: x.get('confidence', 0))
-        validations['address_home'] = validate_address_gouv(best_home['full_address'])
+        validations['address_home'] = validate_address_gouv_smart(best_home['full_address'])
     
     # 3. Validation adresses ENTREPRISE
     if enterprise_addresses:
         best_work = max(enterprise_addresses, key=lambda x: x.get('confidence', 0))
-        validations['address_work'] = validate_address_gouv(best_work['full_address'])
+        validations['address_work'] = validate_address_gouv_smart(best_work['full_address'])
     
     # Stats d'extraction
     validations['extraction_stats']['total_addresses_found'] = len(home_addresses) + len(enterprise_addresses)
@@ -1611,137 +2253,6 @@ def extract_text_from_pdf_advanced(pdf_file):
     except Exception as e:
         return None, f"❌ Erreur d'extraction : {str(e)}"
 
-
-def extract_text_from_image(image_file):
-    """
-    Extraction de texte d'image - VERSION OPTIMISÉE avec docTR
-    
-    Ordre de priorité :
-    1. docTR (spécialisé documents officiels, excellent pour CNI)
-    2. Tesseract (fallback)
-    """
-    try:
-        img = Image.open(image_file)
-        width, height = img.size
-        
-        extracted_text = None
-        ocr_method = None
-        
-        # ========== MÉTHODE 1 : docTR (OPTIMAL pour CNI/Passeports) ==========
-        try:
-            from doctr.io import DocumentFile
-            from doctr.models import ocr_predictor
-            
-            # Initialiser docTR (cache pour éviter rechargement)
-            if 'doctr_model' not in st.session_state:
-                # Utiliser le modèle pré-entraîné
-                st.session_state.doctr_model = ocr_predictor(pretrained=True)
-            
-            model = st.session_state.doctr_model
-            
-            # Convertir l'image
-            import numpy as np
-            img_array = np.array(img)
-            
-            # Créer document
-            doc = DocumentFile.from_images([img_array])
-            
-            # OCR
-            result = model(doc)
-            
-            # Extraire le texte
-            texts = []
-            for page in result.pages:
-                for block in page.blocks:
-                    for line in block.lines:
-                        for word in line.words:
-                            texts.append(word.value)
-            
-            # Reconstruire avec espaces
-            extracted_text = ' '.join(texts)
-            ocr_method = "docTR"
-            
-            if len(extracted_text) > 30:
-                return extracted_text, None
-        
-        except ImportError:
-            pass  # docTR pas installé
-        except Exception as e:
-            import streamlit as st
-            st.warning(f"⚠️ docTR échoué : {str(e)[:100]}")
-        
-        # ========== MÉTHODE 2 : Tesseract (FALLBACK) ==========
-        try:
-            import pytesseract
-            from PIL import ImageEnhance, ImageFilter
-            
-            # Prétraitement optimisé pour CNI
-            # 1. Niveaux de gris
-            img_gray = img.convert('L')
-            
-            # 2. Augmenter contraste (CNI ont souvent faible contraste)
-            enhancer = ImageEnhance.Contrast(img_gray)
-            img_contrast = enhancer.enhance(2.5)  # Augmenté à 2.5
-            
-            # 3. Netteté
-            img_sharp = img_contrast.filter(ImageFilter.SHARPEN)
-            
-            # 4. Binarisation adaptative (meilleur pour CNI)
-            threshold = 140
-            img_binary = img_sharp.point(lambda p: p > threshold and 255)
-            
-            # 5. OCR avec paramètres optimisés pour CNI
-            try:
-                # PSM 6 = assume a single uniform block of text
-                custom_config = r'--oem 3 --psm 6 -l fra'
-                extracted_text = pytesseract.image_to_string(img_binary, config=custom_config)
-            except:
-                custom_config = r'--oem 3 --psm 6 -l eng'
-                extracted_text = pytesseract.image_to_string(img_binary, config=custom_config)
-            
-            ocr_method = "Tesseract"
-            
-            if extracted_text and len(extracted_text) > 30:
-                return extracted_text, None
-                
-        except ImportError:
-            pass
-        except Exception as e:
-            import streamlit as st
-            st.warning(f"⚠️ Tesseract OCR échoué : {str(e)[:100]}")
-        
-        # ========== ÉCHEC : Aucun OCR ==========
-        if extracted_text and len(extracted_text) > 10:
-            return extracted_text, f"⚠️ OCR partiel via {ocr_method} ({width}x{height}px)"
-        
-        return None, f"""
-📷 **Image détectée** ({width}x{height}px)
-
-❌ **OCR non disponible**
-
-**Pour installer docTR (RECOMMANDÉ pour CNI) :**
-Ajoutez à requirements.txt :
-```
-python-doctr[torch]
-```
-
-**Alternative - Tesseract (nécessite packages.txt) :**
-Créez `packages.txt` :
-```
-tesseract-ocr
-tesseract-ocr-fra
-```
-
-**Meilleure solution :** Scannez le document en PDF avec une app mobile (CamScanner, Adobe Scan, etc.)
-"""
-
-    except Exception as e:
-        return None, f"❌ Erreur de lecture image : {str(e)}"
-
-
-# ======================
-# VALIDATION DOCUMENT PROFESSIONNEL v4.0
-# ======================
 
 def validate_document_professional(doc_type, metadata, text_content):
     """Validation professionnelle avancée"""
