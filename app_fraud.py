@@ -338,13 +338,23 @@ def extract_french_addresses_ultra(text: str) -> List[Dict]:
         code_postal = pm.group(1)
         ville = pm.group(2).strip()
         
-        # FILTRE CRITIQUE : Vérifier que le code postal n'est pas précédé de "Matricule", "Code", etc.
-        text_before_cp = text_clean[max(0, pm.start()-20):pm.start()]
-        if re.search(r'(Matricule|Code|N°|Employee|ID)\s*$', text_before_cp, re.IGNORECASE):
-            # C'est un numéro de matricule, pas un code postal !
+        # FILTRE CRITIQUE V2 : Vérifier dans le texte ORIGINAL et NETTOYÉ
+        # Car "Matricule 021350\nLA DEFENSE" a le \n qui casse la détection
+        
+        # Chercher dans texte nettoyé
+        text_before_clean = text_clean[max(0, pm.start()-30):pm.start()]
+        is_matricule_clean = re.search(r'(Matricule|Code|N°|Employee|ID|Numéro)[^\d]{0,10}$', text_before_clean, re.IGNORECASE)
+        
+        # Chercher aussi dans texte original pour détecter "Matricule 021350\n"
+        # Trouver la position correspondante dans le texte original
+        text_before_original = text_original[max(0, pm.start()-50):pm.start()]
+        is_matricule_original = re.search(r'(Matricule|Code|N°|Employee|ID|Numéro)[^\d]{0,15}(\d{1})?$', text_before_original, re.IGNORECASE)
+        
+        if is_matricule_clean or is_matricule_original:
+            # C'est un numéro de matricule/employé, pas un code postal !
             continue
         
-        # Valider le code postal
+        # Valider le code postal français
         if not validate_french_postal_code(code_postal):
             continue
         
@@ -1291,39 +1301,48 @@ def perform_external_validations(documents_data: Dict, structured_data: Dict) ->
         addr = addr_context['address']
         addr_text = addr['full_address'].lower()
         addr_cp = addr.get('code_postal', '')
+        addr_rue = addr.get('nom_voie', '').lower()
         
         # L'adresse est-elle proche de l'adresse SIRET validée ?
         is_enterprise_address = False
+        classification_reason = ""
         
         if validated_siret_address:
             # RÈGLE 1 : Comparer le code postal
             siret_cp_match = re.search(r'\b(\d{5})\b', validated_siret_address)
             if siret_cp_match:
                 siret_cp = siret_cp_match.group(1)
+                
                 if addr_cp == siret_cp:
-                    # Même code postal = probablement entreprise
+                    # Même code postal = ENTREPRISE
                     is_enterprise_address = True
+                    classification_reason = f"CP identique ({addr_cp} = {siret_cp})"
+                elif addr_cp != siret_cp and addr_cp:
+                    # Code postal DIFFÉRENT = DOMICILE
+                    is_enterprise_address = False
+                    classification_reason = f"CP différent ({addr_cp} ≠ {siret_cp})"
             
-            # RÈGLE 2 : Comparer le nom de la rue
-            addr_rue = addr.get('nom_voie', '').lower()
-            if addr_rue and len(addr_rue) > 5:  # Nom de rue significatif
-                if addr_rue in validated_siret_address:
-                    # Même rue = c'est l'entreprise
+            # RÈGLE 2 : Comparer le nom de la rue (prioritaire sur CP si match exact)
+            if addr_rue and len(addr_rue) > 5:
+                # Normaliser pour comparaison
+                addr_rue_clean = re.sub(r'[^a-z0-9]', '', addr_rue)
+                siret_addr_clean = re.sub(r'[^a-z0-9]', '', validated_siret_address)
+                
+                if addr_rue_clean in siret_addr_clean:
+                    # Même rue = ENTREPRISE (override CP si différent)
                     is_enterprise_address = True
-            
-            # RÈGLE 3 : Si code postal DIFFÉRENT et pas même rue = DOMICILE
-            if addr_cp and siret_cp_match and addr_cp != siret_cp_match.group(1):
-                # Code postal différent = c'est probablement le domicile
-                is_enterprise_address = False
+                    classification_reason = f"Même rue ({addr_rue})"
         
         # Classification finale
         if is_enterprise_address:
             enterprise_addresses.append(addr)
         else:
             # Si on a un SIRET validé et que l'adresse n'est pas celle de l'entreprise
-            # C'est probablement le domicile
+            # C'est le DOMICILE
             if validated_siret_address:
                 home_addresses.append(addr)
+                if not classification_reason:
+                    classification_reason = "Adresse différente de l'entreprise"
             else:
                 # Pas de SIRET validé : on ne peut pas classifier
                 # On met dans domicile par défaut si le doc n'a pas de SIRET
@@ -1554,21 +1573,110 @@ def extract_text_from_pdf_advanced(pdf_file):
 
 
 def extract_text_from_image(image_file):
-    """Lecture basique d'image (OCR nécessite Tesseract)"""
+    """
+    Extraction de texte d'image avec OCR MULTI-MOTEURS
+    Version EXPERTE - Essaie plusieurs méthodes dans l'ordre
+    
+    Ordre de priorité :
+    1. EasyOCR (meilleur pour documents français)
+    2. pytesseract (fallback si EasyOCR absent)
+    3. Extraction basique métadonnées
+    """
     try:
         img = Image.open(image_file)
         width, height = img.size
-
-        # Tenter OCR si pytesseract est disponible
+        
+        # Convertir en array numpy pour OCR
+        import numpy as np
+        img_array = np.array(img)
+        
+        extracted_text = None
+        ocr_method = None
+        
+        # ========== MÉTHODE 1 : EasyOCR (RECOMMANDÉ) ==========
+        try:
+            import easyocr
+            
+            # Initialiser le reader (français + anglais)
+            reader = easyocr.Reader(['fr', 'en'], gpu=False, verbose=False)
+            
+            # Extraire le texte
+            result = reader.readtext(img_array, detail=0, paragraph=True)
+            
+            # Joindre les résultats
+            extracted_text = '\n'.join(result)
+            ocr_method = "EasyOCR"
+            
+            # Valider que l'extraction est bonne
+            if extracted_text and len(extracted_text) > 30:
+                return extracted_text, None
+                
+        except ImportError:
+            pass  # EasyOCR pas installé
+        except Exception as e:
+            pass  # Erreur EasyOCR, passer au suivant
+        
+        # ========== MÉTHODE 2 : Pytesseract (FALLBACK) ==========
         try:
             import pytesseract
-            text = pytesseract.image_to_string(img, lang='fra')
-            if text and len(text) > 20:
-                return text, None
+            from PIL import ImageEnhance, ImageFilter
+            
+            # Prétraitement de l'image pour améliorer l'OCR
+            # 1. Convertir en niveaux de gris
+            img_gray = img.convert('L')
+            
+            # 2. Augmenter le contraste
+            enhancer = ImageEnhance.Contrast(img_gray)
+            img_contrast = enhancer.enhance(2.0)
+            
+            # 3. Augmenter la netteté
+            img_sharp = img_contrast.filter(ImageFilter.SHARPEN)
+            
+            # 4. OCR avec config optimisée pour documents français
+            custom_config = r'--oem 3 --psm 6 -l fra'
+            extracted_text = pytesseract.image_to_string(img_sharp, config=custom_config)
+            ocr_method = "Tesseract"
+            
+            if extracted_text and len(extracted_text) > 30:
+                return extracted_text, None
+                
         except ImportError:
-            pass
+            pass  # Tesseract pas installé
+        except Exception as e:
+            pass  # Erreur Tesseract
+        
+        # ========== MÉTHODE 3 : OCR Basique PIL ==========
+        # Si les deux moteurs ont échoué, au moins extraire les métadonnées
+        if extracted_text and len(extracted_text) > 10:
+            return extracted_text, f"⚠️ OCR partiel via {ocr_method} ({width}x{height}px)"
+        
+        # ========== ÉCHEC : Aucun OCR disponible ==========
+        return None, f"""
+📷 **Image détectée** ({width}x{height}px)
 
-        return None, f"📷 Image détectée ({width}x{height}px) - OCR nécessite Tesseract (optionnel)"
+❌ **OCR indisponible** - Aucun moteur OCR installé
+
+**Solutions :**
+
+1. **Installer EasyOCR** (RECOMMANDÉ - Pur Python) :
+   ```bash
+   pip install easyocr
+   ```
+
+2. **Installer Tesseract** (Alternative) :
+   - Windows : https://github.com/UB-Mannheim/tesseract/wiki
+   - Linux : `sudo apt-get install tesseract-ocr tesseract-ocr-fra`
+   - Mac : `brew install tesseract tesseract-lang`
+   
+   Puis :
+   ```bash
+   pip install pytesseract
+   ```
+
+3. **Télécharger un PDF** au lieu d'une photo (recommandé)
+
+**Note :** Pour une détection de fraude fiable, l'OCR est ESSENTIEL pour analyser les CNI, permis, etc.
+"""
 
     except Exception as e:
         return None, f"❌ Erreur de lecture image : {str(e)}"
