@@ -1574,49 +1574,25 @@ def extract_text_from_pdf_advanced(pdf_file):
 
 def extract_text_from_image(image_file):
     """
-    Extraction de texte d'image avec OCR MULTI-MOTEURS
-    Version EXPERTE - Essaie plusieurs méthodes dans l'ordre
+    Extraction de texte d'image - VERSION OPTIMISÉE STREAMLIT CLOUD
     
-    Ordre de priorité :
-    1. EasyOCR (meilleur pour documents français)
-    2. pytesseract (fallback si EasyOCR absent)
-    3. Extraction basique métadonnées
+    CHANGEMENT IMPORTANT :
+    - EasyOCR désactivé (trop gourmand en mémoire pour Streamlit Cloud)
+    - Utilise Tesseract si disponible
+    - Sinon, retourne un message clair
+    
+    Pour utiliser EasyOCR en LOCAL :
+    - Installer : pip install easyocr
+    - Décommenter la section EasyOCR ci-dessous
     """
     try:
         img = Image.open(image_file)
         width, height = img.size
         
-        # Convertir en array numpy pour OCR
-        import numpy as np
-        img_array = np.array(img)
-        
         extracted_text = None
         ocr_method = None
         
-        # ========== MÉTHODE 1 : EasyOCR (RECOMMANDÉ) ==========
-        try:
-            import easyocr
-            
-            # Initialiser le reader (français + anglais)
-            reader = easyocr.Reader(['fr', 'en'], gpu=False, verbose=False)
-            
-            # Extraire le texte
-            result = reader.readtext(img_array, detail=0, paragraph=True)
-            
-            # Joindre les résultats
-            extracted_text = '\n'.join(result)
-            ocr_method = "EasyOCR"
-            
-            # Valider que l'extraction est bonne
-            if extracted_text and len(extracted_text) > 30:
-                return extracted_text, None
-                
-        except ImportError:
-            pass  # EasyOCR pas installé
-        except Exception as e:
-            pass  # Erreur EasyOCR, passer au suivant
-        
-        # ========== MÉTHODE 2 : Pytesseract (FALLBACK) ==========
+        # ========== MÉTHODE 1 : Pytesseract (PRIORITÉ pour Cloud) ==========
         try:
             import pytesseract
             from PIL import ImageEnhance, ImageFilter
@@ -1632,9 +1608,21 @@ def extract_text_from_image(image_file):
             # 3. Augmenter la netteté
             img_sharp = img_contrast.filter(ImageFilter.SHARPEN)
             
-            # 4. OCR avec config optimisée pour documents français
-            custom_config = r'--oem 3 --psm 6 -l fra'
-            extracted_text = pytesseract.image_to_string(img_sharp, config=custom_config)
+            # 4. Binarisation (seuil)
+            threshold = 128
+            img_binary = img_sharp.point(lambda p: p > threshold and 255)
+            
+            # 5. OCR avec config optimisée pour documents français
+            # Note: Sur Streamlit Cloud, utiliser 'eng' car 'fra' peut ne pas être installé
+            try:
+                # Essayer français d'abord
+                custom_config = r'--oem 3 --psm 6 -l fra'
+                extracted_text = pytesseract.image_to_string(img_binary, config=custom_config)
+            except:
+                # Fallback anglais
+                custom_config = r'--oem 3 --psm 6 -l eng'
+                extracted_text = pytesseract.image_to_string(img_binary, config=custom_config)
+            
             ocr_method = "Tesseract"
             
             if extracted_text and len(extracted_text) > 30:
@@ -1643,39 +1631,63 @@ def extract_text_from_image(image_file):
         except ImportError:
             pass  # Tesseract pas installé
         except Exception as e:
-            pass  # Erreur Tesseract
+            # Log l'erreur mais continue
+            st.warning(f"⚠️ Tesseract OCR échoué : {str(e)[:100]}")
         
-        # ========== MÉTHODE 3 : OCR Basique PIL ==========
-        # Si les deux moteurs ont échoué, au moins extraire les métadonnées
+        # ========== MÉTHODE 2 : EasyOCR (DÉSACTIVÉ par défaut pour Cloud) ==========
+        # DÉCOMMENTER CETTE SECTION pour utiliser EasyOCR en LOCAL uniquement
+        # ATTENTION : Ne PAS décommenter sur Streamlit Cloud (mémoire insuffisante)
+        
+        # try:
+        #     import easyocr
+        #     import os
+        #     
+        #     # Vérifier si on est sur Streamlit Cloud
+        #     is_cloud = os.environ.get('STREAMLIT_SHARING_MODE') or os.environ.get('STREAMLIT_RUNTIME_ENV')
+        #     
+        #     if not is_cloud:  # Seulement en local
+        #         # Cache le reader pour éviter de recharger à chaque fois
+        #         if 'easyocr_reader' not in st.session_state:
+        #             st.session_state.easyocr_reader = easyocr.Reader(['fr', 'en'], gpu=False, verbose=False)
+        #         
+        #         reader = st.session_state.easyocr_reader
+        #         
+        #         # Convertir en array numpy
+        #         import numpy as np
+        #         img_array = np.array(img)
+        #         
+        #         # Extraire le texte
+        #         result = reader.readtext(img_array, detail=0, paragraph=True)
+        #         extracted_text = '\n'.join(result)
+        #         ocr_method = "EasyOCR"
+        #         
+        #         if extracted_text and len(extracted_text) > 30:
+        #             return extracted_text, None
+        # except:
+        #     pass
+        
+        # ========== ÉCHEC : Aucun OCR disponible ==========
         if extracted_text and len(extracted_text) > 10:
             return extracted_text, f"⚠️ OCR partiel via {ocr_method} ({width}x{height}px)"
         
-        # ========== ÉCHEC : Aucun OCR disponible ==========
+        # Message d'erreur clair et actionnable
         return None, f"""
 📷 **Image détectée** ({width}x{height}px)
 
-❌ **OCR indisponible** - Aucun moteur OCR installé
+❌ **OCR non disponible ou échec d'extraction**
 
-**Solutions :**
+**Sur Streamlit Cloud :**
+- Tesseract est disponible mais peut échouer sur certaines images
+- EasyOCR est désactivé (trop de mémoire requise)
+- **Solution :** Téléchargez un **PDF** au lieu d'une photo
 
-1. **Installer EasyOCR** (RECOMMANDÉ - Pur Python) :
-   ```bash
-   pip install easyocr
-   ```
+**En local :**
+- Pour de meilleurs résultats, installez Tesseract :
+  - Windows : https://github.com/UB-Mannheim/tesseract/wiki
+  - Linux : `sudo apt-get install tesseract-ocr tesseract-ocr-fra`
+  - Mac : `brew install tesseract tesseract-lang`
 
-2. **Installer Tesseract** (Alternative) :
-   - Windows : https://github.com/UB-Mannheim/tesseract/wiki
-   - Linux : `sudo apt-get install tesseract-ocr tesseract-ocr-fra`
-   - Mac : `brew install tesseract tesseract-lang`
-   
-   Puis :
-   ```bash
-   pip install pytesseract
-   ```
-
-3. **Télécharger un PDF** au lieu d'une photo (recommandé)
-
-**Note :** Pour une détection de fraude fiable, l'OCR est ESSENTIEL pour analyser les CNI, permis, etc.
+**Recommandation :** Pour une analyse fiable, utilisez des **documents PDF** plutôt que des photos.
 """
 
     except Exception as e:
@@ -2203,91 +2215,142 @@ def analyze_all_documents():
         'timestamp': datetime.now().isoformat()
     }
 
-    # Phase 1: Analyse de chaque document
-    for doc_key, doc_info in st.session_state.uploaded_files.items():
-        uploaded_file = doc_info['file']
+    # Barre de progression
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    total_docs = len(st.session_state.uploaded_files)
+    
+    try:
+        # Phase 1: Analyse de chaque document
+        for idx, (doc_key, doc_info) in enumerate(st.session_state.uploaded_files.items(), 1):
+            status_text.text(f"📄 Analyse {idx}/{total_docs} : {doc_info['name'][:40]}...")
+            progress_bar.progress(idx / (total_docs + 2))  # +2 pour les phases suivantes
+            
+            try:
+                uploaded_file = doc_info['file']
 
-        if doc_info['type'] == 'application/pdf':
-            # Métadonnées PDF
-            uploaded_file.seek(0)
-            metadata = analyze_pdf_metadata_advanced(uploaded_file)
+                if doc_info['type'] == 'application/pdf':
+                    # Métadonnées PDF
+                    uploaded_file.seek(0)
+                    metadata = analyze_pdf_metadata_advanced(uploaded_file)
 
-            # Extraction texte
-            uploaded_file.seek(0)
-            text_extract, error_msg = extract_text_from_pdf_advanced(uploaded_file)
+                    # Extraction texte
+                    uploaded_file.seek(0)
+                    text_extract, error_msg = extract_text_from_pdf_advanced(uploaded_file)
 
-            # Validation
-            validation = validate_document_professional(doc_key, metadata, text_extract)
+                    # Validation
+                    validation = validate_document_professional(doc_key, metadata, text_extract)
 
-            results['documents'][doc_key] = {
-                'metadata': metadata,
-                'text_extract': text_extract[:2000] if text_extract else error_msg,
-                'text_full_length': len(text_extract) if text_extract else 0,
-                'validation': validation
-            }
+                    results['documents'][doc_key] = {
+                        'metadata': metadata,
+                        'text_extract': text_extract[:2000] if text_extract else error_msg,
+                        'text_full_length': len(text_extract) if text_extract else 0,
+                        'validation': validation
+                    }
 
-            # Extraction données structurées ULTRA-ROBUSTE
-            if text_extract:
-                results['structured_data'][doc_key] = extract_structured_data(text_extract)
-        else:
-            # Image
-            uploaded_file.seek(0)
-            text_extract, error_msg = extract_text_from_image(uploaded_file)
+                    # Extraction données structurées ULTRA-ROBUSTE
+                    if text_extract:
+                        results['structured_data'][doc_key] = extract_structured_data(text_extract)
+                else:
+                    # Image
+                    uploaded_file.seek(0)
+                    text_extract, error_msg = extract_text_from_image(uploaded_file)
 
-            results['documents'][doc_key] = {
-                'metadata': {
-                    'type': 'image',
-                    'creator': 'Image',
-                    'producer': 'N/A',
-                    'creation_date': 'Non disponible',
-                    'modification_date': 'Non disponible',
-                    'num_pages': 1,
-                    'suspicious_signs': ['ℹ️ Image - OCR limité'],
-                    'risk_score': 25
-                },
-                'text_extract': text_extract if text_extract else error_msg,
-                'text_full_length': len(text_extract) if text_extract else 0,
-                'validation': {
-                    'score_fraude': 0.25,
-                    'anomalies': ['ℹ️ Document image - Analyse OCR limitée'],
-                    'checks': {'is_image': True},
-                    'risk_level': 'Faible'
+                    results['documents'][doc_key] = {
+                        'metadata': {
+                            'type': 'image',
+                            'creator': 'Image',
+                            'producer': 'N/A',
+                            'creation_date': 'Non disponible',
+                            'modification_date': 'Non disponible',
+                            'num_pages': 1,
+                            'suspicious_signs': ['ℹ️ Image - OCR limité'],
+                            'risk_score': 25
+                        },
+                        'text_extract': text_extract if text_extract else error_msg,
+                        'text_full_length': len(text_extract) if text_extract else 0,
+                        'validation': {
+                            'score_fraude': 0.25,
+                            'anomalies': ['ℹ️ Document image - Analyse OCR limitée'],
+                            'checks': {'is_image': True},
+                            'risk_level': 'Faible'
+                        }
+                    }
+
+                    if text_extract:
+                        results['structured_data'][doc_key] = extract_structured_data(text_extract)
+                    else:
+                        results['structured_data'][doc_key] = {}
+            
+            except Exception as e:
+                # En cas d'erreur sur un document, continuer avec les autres
+                st.error(f"⚠️ Erreur sur {doc_info['name']}: {str(e)[:200]}")
+                results['documents'][doc_key] = {
+                    'metadata': {'error': str(e)},
+                    'text_extract': f"Erreur: {str(e)}",
+                    'text_full_length': 0,
+                    'validation': {'score_fraude': 0.5, 'anomalies': [f"Erreur: {str(e)}"], 'checks': {}, 'risk_level': 'Moyen'}
                 }
-            }
-
-            if text_extract:
-                results['structured_data'][doc_key] = extract_structured_data(text_extract)
-            else:
                 results['structured_data'][doc_key] = {}
+        
+        # Phase 2: Validations externes v4.0
+        status_text.text("🌐 Validations externes en cours...")
+        progress_bar.progress((total_docs + 1) / (total_docs + 2))
+        
+        external_validations = perform_external_validations(
+            results['documents'],
+            results['structured_data']
+        )
 
-    # Phase 2: Validations externes v4.0
-    external_validations = perform_external_validations(
-        results['documents'],
-        results['structured_data']
-    )
+        results['external_validations'] = external_validations
 
-    results['external_validations'] = external_validations
+        # Phase 3: Validation croisée
+        status_text.text("🔄 Validation croisée...")
+        progress_bar.progress((total_docs + 2) / (total_docs + 2))
+        
+        cross_validation = cross_validate_dossier_advanced(
+            results['documents'],
+            results['structured_data']
+        )
 
-    # Phase 3: Validation croisée
-    cross_validation = cross_validate_dossier_advanced(
-        results['documents'],
-        results['structured_data']
-    )
+        results['cross_validation'] = cross_validation
 
-    results['cross_validation'] = cross_validation
+        # Phase 4: Score global v4.0
+        global_score = calculate_global_score(
+            results['documents'],
+            cross_validation,
+            external_validations
+        )
 
-    # Phase 4: Score global v4.0
-    global_score = calculate_global_score(
-        results['documents'],
-        cross_validation,
-        external_validations
-    )
+        results['global_score'] = global_score
 
-    results['global_score'] = global_score
-
-    # Sauvegarder
-    st.session_state.analysis_results = results
-    st.session_state.external_validations = external_validations
+        # Sauvegarder
+        st.session_state.analysis_results = results
+        st.session_state.external_validations = external_validations
+        
+        # Nettoyer l'interface
+        progress_bar.empty()
+        status_text.empty()
+        
+    except Exception as e:
+        # Erreur globale critique
+        progress_bar.empty()
+        status_text.empty()
+        st.error(f"""
+        🚨 **Erreur critique pendant l'analyse**
+        
+        **Message :** {str(e)}
+        
+        **Solutions possibles :**
+        - Réessayez avec des fichiers PDF plutôt que des images
+        - Vérifiez que les fichiers ne sont pas corrompus
+        - Réduisez le nombre de documents (essayez 1-2 d'abord)
+        - Actualisez la page et réessayez
+        
+        Si le problème persiste, contactez le support.
+        """)
+        raise e  # Relancer pour debug
 
 
 # ======================
