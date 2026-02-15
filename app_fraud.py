@@ -338,20 +338,35 @@ def extract_french_addresses_ultra(text: str) -> List[Dict]:
         code_postal = pm.group(1)
         ville = pm.group(2).strip()
         
-        # FILTRE CRITIQUE V2 : Vérifier dans le texte ORIGINAL et NETTOYÉ
-        # Car "Matricule 021350\nLA DEFENSE" a le \n qui casse la détection
+        # FILTRE ULTRA-ROBUSTE V3 : Vérifier le contexte AVANT le code postal
+        # Le vrai problème : "Matricule 021350" → On capture "21350"
         
-        # Chercher dans texte nettoyé
-        text_before_clean = text_clean[max(0, pm.start()-30):pm.start()]
-        is_matricule_clean = re.search(r'(Matricule|Code|N°|Employee|ID|Numéro)[^\d]{0,10}$', text_before_clean, re.IGNORECASE)
+        # Stratégie : Chercher "Matricule" suivi de 0-2 chiffres PUIS notre CP
+        # Pattern : "Matricule 021350" → "Matricule 0" + "21350"
         
-        # Chercher aussi dans texte original pour détecter "Matricule 021350\n"
-        # Trouver la position correspondante dans le texte original
-        text_before_original = text_original[max(0, pm.start()-50):pm.start()]
-        is_matricule_original = re.search(r'(Matricule|Code|N°|Employee|ID|Numéro)[^\d]{0,15}(\d{1})?$', text_before_original, re.IGNORECASE)
+        # Contexte étendu AVANT le match
+        context_start = max(0, pm.start() - 100)
+        context_before = text_clean[context_start:pm.start()]
         
-        if is_matricule_clean or is_matricule_original:
-            # C'est un numéro de matricule/employé, pas un code postal !
+        # Chercher si "Matricule", "Code", etc. apparaît JUSTE avant
+        # Patterns suspects :
+        # - "Matricule 021350" → 0 ou 1 ou 2 chiffres avant notre CP
+        # - "Code 021350"
+        # - "N° 021350"
+        
+        # Si on trouve un mot-clé suivi de 0-2 chiffres à la fin du contexte
+        suspicious_pattern = r'(Matricule|Code\s+employé|N°\s*employé|Employee\s+ID|ID\s+n°|Numéro\s+matricule)\s*(\d{0,2})\s*$'
+        
+        if re.search(suspicious_pattern, context_before, re.IGNORECASE):
+            # C'est probablement un numéro matricule, PAS un code postal
+            continue
+        
+        # Vérification additionnelle : le CP ne doit pas être précédé IMMÉDIATEMENT de chiffres
+        # "021350" → "0" + "21350" (matricule)
+        # "92800" → OK (vrai CP)
+        immediate_before = text_clean[max(0, pm.start()-2):pm.start()].strip()
+        if immediate_before and immediate_before[-1].isdigit():
+            # Il y a un chiffre juste avant → probablement partie d'un numéro plus long
             continue
         
         # Valider le code postal français
@@ -1351,6 +1366,17 @@ def perform_external_validations(documents_data: Dict, structured_data: Dict) ->
                 else:
                     enterprise_addresses.append(addr)
     
+    # DEBUG : Afficher la classification (peut être désactivé en prod)
+    import streamlit as st
+    with st.expander("🔍 DEBUG Classification Adresses"):
+        st.write(f"**SIRET validé :** {validated_siret_address}")
+        st.write(f"**Adresses entreprise :** {len(enterprise_addresses)}")
+        for addr in enterprise_addresses:
+            st.write(f"  - {addr['full_address']} (CP: {addr.get('code_postal')})")
+        st.write(f"**Adresses domicile :** {len(home_addresses)}")
+        for addr in home_addresses:
+            st.write(f"  - {addr['full_address']} (CP: {addr.get('code_postal')})")
+    
     # Si aucune classification n'a fonctionné, utiliser une heuristique simple
     if not home_addresses and not enterprise_addresses:
         # Prendre toutes les adresses qui ne sont PAS l'adresse du SIRET
@@ -1574,16 +1600,12 @@ def extract_text_from_pdf_advanced(pdf_file):
 
 def extract_text_from_image(image_file):
     """
-    Extraction de texte d'image - VERSION OPTIMISÉE STREAMLIT CLOUD
+    Extraction de texte d'image - VERSION OPTIMISÉE avec PaddleOCR
     
-    CHANGEMENT IMPORTANT :
-    - EasyOCR désactivé (trop gourmand en mémoire pour Streamlit Cloud)
-    - Utilise Tesseract si disponible
-    - Sinon, retourne un message clair
-    
-    Pour utiliser EasyOCR en LOCAL :
-    - Installer : pip install easyocr
-    - Décommenter la section EasyOCR ci-dessous
+    Ordre de priorité :
+    1. PaddleOCR (léger, 150MB, fonctionne sur Cloud)
+    2. Tesseract (si disponible)
+    3. Message d'erreur clair
     """
     try:
         img = Image.open(image_file)
@@ -1592,34 +1614,63 @@ def extract_text_from_image(image_file):
         extracted_text = None
         ocr_method = None
         
-        # ========== MÉTHODE 1 : Pytesseract (PRIORITÉ pour Cloud) ==========
+        # ========== MÉTHODE 1 : PaddleOCR (OPTIMAL pour Streamlit Cloud) ==========
+        try:
+            from paddleocr import PaddleOCR
+            
+            # Initialiser PaddleOCR (cache pour éviter rechargement)
+            if 'paddleocr_reader' not in st.session_state:
+                # use_angle_cls=True pour rotation auto, lang='fr' pour français
+                st.session_state.paddleocr_reader = PaddleOCR(
+                    use_angle_cls=True, 
+                    lang='fr',
+                    use_gpu=False,
+                    show_log=False
+                )
+            
+            ocr = st.session_state.paddleocr_reader
+            
+            # Convertir PIL Image en array numpy
+            import numpy as np
+            img_array = np.array(img)
+            
+            # OCR
+            result = ocr.ocr(img_array, cls=True)
+            
+            # Extraire le texte
+            if result and result[0]:
+                texts = [line[1][0] for line in result[0]]
+                extracted_text = '\n'.join(texts)
+                ocr_method = "PaddleOCR"
+                
+                if len(extracted_text) > 30:
+                    return extracted_text, None
+        
+        except ImportError:
+            pass  # PaddleOCR pas installé
+        except Exception as e:
+            # Log mais continue
+            import streamlit as st
+            st.warning(f"⚠️ PaddleOCR échoué : {str(e)[:100]}")
+        
+        # ========== MÉTHODE 2 : Tesseract (FALLBACK) ==========
         try:
             import pytesseract
             from PIL import ImageEnhance, ImageFilter
             
-            # Prétraitement de l'image pour améliorer l'OCR
-            # 1. Convertir en niveaux de gris
+            # Prétraitement de l'image
             img_gray = img.convert('L')
-            
-            # 2. Augmenter le contraste
             enhancer = ImageEnhance.Contrast(img_gray)
             img_contrast = enhancer.enhance(2.0)
-            
-            # 3. Augmenter la netteté
             img_sharp = img_contrast.filter(ImageFilter.SHARPEN)
-            
-            # 4. Binarisation (seuil)
             threshold = 128
             img_binary = img_sharp.point(lambda p: p > threshold and 255)
             
-            # 5. OCR avec config optimisée pour documents français
-            # Note: Sur Streamlit Cloud, utiliser 'eng' car 'fra' peut ne pas être installé
+            # OCR
             try:
-                # Essayer français d'abord
                 custom_config = r'--oem 3 --psm 6 -l fra'
                 extracted_text = pytesseract.image_to_string(img_binary, config=custom_config)
             except:
-                # Fallback anglais
                 custom_config = r'--oem 3 --psm 6 -l eng'
                 extracted_text = pytesseract.image_to_string(img_binary, config=custom_config)
             
@@ -1629,65 +1680,35 @@ def extract_text_from_image(image_file):
                 return extracted_text, None
                 
         except ImportError:
-            pass  # Tesseract pas installé
+            pass
         except Exception as e:
-            # Log l'erreur mais continue
+            import streamlit as st
             st.warning(f"⚠️ Tesseract OCR échoué : {str(e)[:100]}")
         
-        # ========== MÉTHODE 2 : EasyOCR (DÉSACTIVÉ par défaut pour Cloud) ==========
-        # DÉCOMMENTER CETTE SECTION pour utiliser EasyOCR en LOCAL uniquement
-        # ATTENTION : Ne PAS décommenter sur Streamlit Cloud (mémoire insuffisante)
-        
-        # try:
-        #     import easyocr
-        #     import os
-        #     
-        #     # Vérifier si on est sur Streamlit Cloud
-        #     is_cloud = os.environ.get('STREAMLIT_SHARING_MODE') or os.environ.get('STREAMLIT_RUNTIME_ENV')
-        #     
-        #     if not is_cloud:  # Seulement en local
-        #         # Cache le reader pour éviter de recharger à chaque fois
-        #         if 'easyocr_reader' not in st.session_state:
-        #             st.session_state.easyocr_reader = easyocr.Reader(['fr', 'en'], gpu=False, verbose=False)
-        #         
-        #         reader = st.session_state.easyocr_reader
-        #         
-        #         # Convertir en array numpy
-        #         import numpy as np
-        #         img_array = np.array(img)
-        #         
-        #         # Extraire le texte
-        #         result = reader.readtext(img_array, detail=0, paragraph=True)
-        #         extracted_text = '\n'.join(result)
-        #         ocr_method = "EasyOCR"
-        #         
-        #         if extracted_text and len(extracted_text) > 30:
-        #             return extracted_text, None
-        # except:
-        #     pass
-        
-        # ========== ÉCHEC : Aucun OCR disponible ==========
+        # ========== ÉCHEC : Aucun OCR ==========
         if extracted_text and len(extracted_text) > 10:
             return extracted_text, f"⚠️ OCR partiel via {ocr_method} ({width}x{height}px)"
         
-        # Message d'erreur clair et actionnable
         return None, f"""
 📷 **Image détectée** ({width}x{height}px)
 
-❌ **OCR non disponible ou échec d'extraction**
+❌ **OCR non disponible**
 
-**Sur Streamlit Cloud :**
-- Tesseract est disponible mais peut échouer sur certaines images
-- EasyOCR est désactivé (trop de mémoire requise)
-- **Solution :** Téléchargez un **PDF** au lieu d'une photo
+**Pour installer PaddleOCR (recommandé sur Streamlit Cloud) :**
+Ajoutez à requirements.txt :
+```
+paddlepaddle
+paddleocr>=2.6.0
+```
 
-**En local :**
-- Pour de meilleurs résultats, installez Tesseract :
-  - Windows : https://github.com/UB-Mannheim/tesseract/wiki
-  - Linux : `sudo apt-get install tesseract-ocr tesseract-ocr-fra`
-  - Mac : `brew install tesseract tesseract-lang`
+**Alternative - Tesseract (nécessite packages.txt) :**
+Créez un fichier `packages.txt` à la racine :
+```
+tesseract-ocr
+tesseract-ocr-fra
+```
 
-**Recommandation :** Pour une analyse fiable, utilisez des **documents PDF** plutôt que des photos.
+**Recommandation :** Utilisez des **documents PDF** pour une analyse fiable.
 """
 
     except Exception as e:
