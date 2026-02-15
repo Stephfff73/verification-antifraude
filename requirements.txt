@@ -4,37 +4,43 @@
 # ============================================
 
 
-# Dépendances pour l'application Anti-Fraude Documentaire
-# Version FINALE avec docTR (meilleur OCR pour documents officiels)
+# Dépendances Application Anti-Fraude - VERSION COMPLÈTE ROBUSTE
+# Avec OCR optimisé + OpenCV preprocessing
 
-# Framework principal
+# ========== FRAMEWORK ==========
 streamlit>=1.28.0
 
-# Manipulation de données
+# ========== DONNÉES ==========
 pandas>=2.0.0
 numpy>=1.24.0
 
-# Traitement PDF
+# ========== TRAITEMENT PDF ==========
 PyPDF2>=3.0.0
 
-# Traitement images
+# ========== TRAITEMENT IMAGES + OCR ==========
 Pillow>=10.0.0
 
-# OCR - docTR (OPTIMAL pour CNI, passeports, documents officiels)
-python-doctr[torch]>=0.6.0
+# OpenCV pour prétraitement image (CRITIQUE pour OCR)
+opencv-python>=4.8.0
 
-# OCR - Tesseract (fallback)
+# EasyOCR - Meilleur pour documents administratifs français
+easyocr>=1.7.0
+
+# Tesseract fallback
 pytesseract>=0.3.10
 
-# Requêtes HTTP pour API externes
+# ========== API EXTERNES ==========
 requests>=2.31.0
 
-# Géolocalisation
+# ========== GÉOLOCALISATION ==========
 geopy>=2.4.0
 
-# Validation DNS
+# ========== VALIDATION DNS ==========
 dnspython>=2.4.0
 
-# Note : docTR est spécialisé dans les documents officiels
-# Précision CNI française : ~95%
-# Mémoire : ~400MB (fonctionne sur Streamlit Cloud)
+# ========== NOTES ==========
+# EasyOCR : ~500MB (modèles FR+EN)
+# OpenCV : ~100MB
+# Total : ~800MB
+# Temps installation Streamlit Cloud : 8-12 min
+# Mémoire runtime : ~600-700MB (OK pour Cloud 1GB)
