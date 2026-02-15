@@ -430,12 +430,26 @@ def extract_french_addresses_ultra(text: str) -> List[Dict]:
             type_voie = match1.group(2)
             nom_voie_part1 = match1.group(3).strip()
             
+            # FILTRE : Vérifier que le nom de voie ne contient pas "Matricule"
+            if re.search(r'Matricule|Code\s+employé|N°\s*employé', nom_voie_part1, re.IGNORECASE):
+                # Ce n'est pas un nom de voie, c'est une métadonnée
+                continue
+            
             # Chercher code postal dans line2 ou line3
             for check_line in [line2, line3]:
                 postal_match = re.search(r'(\d{5})\s+([\wÀ-ÿ][\w\s\-\']{2,40})', check_line)
                 if postal_match:
                     code_postal = postal_match.group(1)
                     ville = postal_match.group(2).strip()
+                    
+                    # FILTRE : Vérifier que ce CP n'est pas précédé de "Matricule"
+                    # Chercher dans line1 + line2 combinés
+                    combined = f"{line1} {check_line}"
+                    context_before_cp = combined[:combined.find(code_postal)] if code_postal in combined else ""
+                    
+                    # Si "Matricule" suivi de 0-2 chiffres apparaît juste avant le CP
+                    if re.search(r'(Matricule|Code\s+employé)\s*\d{0,2}\s*$', context_before_cp, re.IGNORECASE):
+                        continue  # Skip ce CP
                     
                     if validate_french_postal_code(code_postal):
                         # Combiner nom de voie (peut être sur 2 lignes)
@@ -1600,12 +1614,11 @@ def extract_text_from_pdf_advanced(pdf_file):
 
 def extract_text_from_image(image_file):
     """
-    Extraction de texte d'image - VERSION OPTIMISÉE avec PaddleOCR
+    Extraction de texte d'image - VERSION OPTIMISÉE avec docTR
     
     Ordre de priorité :
-    1. PaddleOCR (léger, 150MB, fonctionne sur Cloud)
-    2. Tesseract (si disponible)
-    3. Message d'erreur clair
+    1. docTR (spécialisé documents officiels, excellent pour CNI)
+    2. Tesseract (fallback)
     """
     try:
         img = Image.open(image_file)
@@ -1614,60 +1627,72 @@ def extract_text_from_image(image_file):
         extracted_text = None
         ocr_method = None
         
-        # ========== MÉTHODE 1 : PaddleOCR (OPTIMAL pour Streamlit Cloud) ==========
+        # ========== MÉTHODE 1 : docTR (OPTIMAL pour CNI/Passeports) ==========
         try:
-            from paddleocr import PaddleOCR
+            from doctr.io import DocumentFile
+            from doctr.models import ocr_predictor
             
-            # Initialiser PaddleOCR (cache pour éviter rechargement)
-            if 'paddleocr_reader' not in st.session_state:
-                # use_angle_cls=True pour rotation auto, lang='fr' pour français
-                st.session_state.paddleocr_reader = PaddleOCR(
-                    use_angle_cls=True, 
-                    lang='fr',
-                    use_gpu=False,
-                    show_log=False
-                )
+            # Initialiser docTR (cache pour éviter rechargement)
+            if 'doctr_model' not in st.session_state:
+                # Utiliser le modèle pré-entraîné
+                st.session_state.doctr_model = ocr_predictor(pretrained=True)
             
-            ocr = st.session_state.paddleocr_reader
+            model = st.session_state.doctr_model
             
-            # Convertir PIL Image en array numpy
+            # Convertir l'image
             import numpy as np
             img_array = np.array(img)
             
+            # Créer document
+            doc = DocumentFile.from_images([img_array])
+            
             # OCR
-            result = ocr.ocr(img_array, cls=True)
+            result = model(doc)
             
             # Extraire le texte
-            if result and result[0]:
-                texts = [line[1][0] for line in result[0]]
-                extracted_text = '\n'.join(texts)
-                ocr_method = "PaddleOCR"
-                
-                if len(extracted_text) > 30:
-                    return extracted_text, None
+            texts = []
+            for page in result.pages:
+                for block in page.blocks:
+                    for line in block.lines:
+                        for word in line.words:
+                            texts.append(word.value)
+            
+            # Reconstruire avec espaces
+            extracted_text = ' '.join(texts)
+            ocr_method = "docTR"
+            
+            if len(extracted_text) > 30:
+                return extracted_text, None
         
         except ImportError:
-            pass  # PaddleOCR pas installé
+            pass  # docTR pas installé
         except Exception as e:
-            # Log mais continue
             import streamlit as st
-            st.warning(f"⚠️ PaddleOCR échoué : {str(e)[:100]}")
+            st.warning(f"⚠️ docTR échoué : {str(e)[:100]}")
         
         # ========== MÉTHODE 2 : Tesseract (FALLBACK) ==========
         try:
             import pytesseract
             from PIL import ImageEnhance, ImageFilter
             
-            # Prétraitement de l'image
+            # Prétraitement optimisé pour CNI
+            # 1. Niveaux de gris
             img_gray = img.convert('L')
+            
+            # 2. Augmenter contraste (CNI ont souvent faible contraste)
             enhancer = ImageEnhance.Contrast(img_gray)
-            img_contrast = enhancer.enhance(2.0)
+            img_contrast = enhancer.enhance(2.5)  # Augmenté à 2.5
+            
+            # 3. Netteté
             img_sharp = img_contrast.filter(ImageFilter.SHARPEN)
-            threshold = 128
+            
+            # 4. Binarisation adaptative (meilleur pour CNI)
+            threshold = 140
             img_binary = img_sharp.point(lambda p: p > threshold and 255)
             
-            # OCR
+            # 5. OCR avec paramètres optimisés pour CNI
             try:
+                # PSM 6 = assume a single uniform block of text
                 custom_config = r'--oem 3 --psm 6 -l fra'
                 extracted_text = pytesseract.image_to_string(img_binary, config=custom_config)
             except:
@@ -1694,21 +1719,20 @@ def extract_text_from_image(image_file):
 
 ❌ **OCR non disponible**
 
-**Pour installer PaddleOCR (recommandé sur Streamlit Cloud) :**
+**Pour installer docTR (RECOMMANDÉ pour CNI) :**
 Ajoutez à requirements.txt :
 ```
-paddlepaddle
-paddleocr>=2.6.0
+python-doctr[torch]
 ```
 
 **Alternative - Tesseract (nécessite packages.txt) :**
-Créez un fichier `packages.txt` à la racine :
+Créez `packages.txt` :
 ```
 tesseract-ocr
 tesseract-ocr-fra
 ```
 
-**Recommandation :** Utilisez des **documents PDF** pour une analyse fiable.
+**Meilleure solution :** Scannez le document en PDF avec une app mobile (CamScanner, Adobe Scan, etc.)
 """
 
     except Exception as e:
