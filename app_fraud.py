@@ -2968,21 +2968,8 @@ def main():
         '<div class="main-header">🔍 IN\'LI - DÉTECTION FRAUDE DOCUMENTAIRE</div>',
         unsafe_allow_html=True
     )
-if st.session_state.get('current_page') == 'home':
-    st.markdown(
-        """
-        <div class="extraction-success">
-            <h4>🚀 NOUVEAUTÉS au 12/02/26 :</h4>
-            ✨ <strong>Extraction SIRET/SIREN</strong> : + 15 patterns différents (espaces, points, tirets, labels, etc.)<br>
-            ✨ <strong>Extraction adresses françaises</strong> : Détection intelligente avec contexte sémantique<br>
-            ✨ <strong>Emails & Téléphones</strong> : Validation DNS, détection emails jetables<br>
-            ✨ <strong>20 Red Flags</strong> : Signaux d'alerte experts<br>
-            ✨ <strong>Scoring amélioré</strong> : Pondération Red Flags 40%<br>
-            ✨ <strong>Statistiques d'extraction</strong> : Qualité d'extraction mesurée en temps réel
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
+
+
 
 
 
@@ -3046,7 +3033,22 @@ def page_accueil():
     """Page d'accueil"""
 
     st.markdown("## 👋 Bienvenue sur la plateforme de détection de fraude")
-
+    st.markdown(
+        """
+        <div class="extraction-success">
+            <h4>🚀 NOUVEAUTÉS au 12/02/26 :</h4>
+            ✨ <strong>Extraction SIRET/SIREN</strong> : + 15 patterns différents (espaces, points, tirets, labels, etc.)<br>
+            ✨ <strong>Extraction adresses françaises</strong> : Détection intelligente avec contexte sémantique<br>
+            ✨ <strong>Emails & Téléphones</strong> : Validation DNS, détection emails jetables<br>
+            ✨ <strong>20 Red Flags</strong> : Signaux d'alerte experts<br>
+            ✨ <strong>Scoring amélioré</strong> : Pondération Red Flags 40%<br>
+            ✨ <strong>Statistiques d'extraction</strong> : Qualité d'extraction mesurée en temps réel
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+    
+    
     col1, col2 = st.columns([2, 1])
 
     with col1:
