@@ -1,20 +1,4 @@
 
-"""
-🔍 IN'LI - SYSTÈME EXPERT DE DÉTECTION DE FRAUDE DOCUMENTAIRE
-Application Streamlit avec validation externe multi-sources
-VERSION 4.0 ULTIMATE - Extraction de données ultra-performante
-Expert Anti-Fraude International depuis 40 ans
-
-NOUVEAUTÉS v4.0 :
-- Extraction SIRET/SIREN ULTRA-ROBUSTE (10+ patterns)
-- Extraction d'adresses françaises INTELLIGENTE (contexte sémantique)
-- OCR intégré pour documents scannés (Tesseract optionnel)
-- Détection de manipulation PDF/Image avancée
-- Normalisation automatique des données
-- Validation croisée par IA contextuelle
-- Scoring expert multi-niveaux
-"""
-
 import streamlit as st
 import pandas as pd
 from datetime import datetime
@@ -962,10 +946,6 @@ def is_valid_siret_format(siret: str) -> bool:
     return True
 
 
-"""
-EXTRACTION D'ADRESSES ULTRA-ROBUSTE - VERSION EXPERTE
-Garantit l'extraction de TOUTES les adresses françaises valides
-"""
 
 import re
 from typing import List, Dict
