@@ -2,8 +2,6 @@
 # IN'LI ULTIMATE v4.0 - Requirements
 # Système Expert de Détection de Fraude Documentaire
 # ============================================
-
-
 # Dépendances Application Anti-Fraude - VERSION COMPLÈTE ROBUSTE
 # Avec OCR optimisé + OpenCV preprocessing
 
