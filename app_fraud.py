@@ -1,4 +1,3 @@
-
 """
 🔍 IN'LI - SYSTÈME EXPERT DE DÉTECTION DE FRAUDE DOCUMENTAIRE
 Application Streamlit avec validation externe multi-sources
@@ -163,8 +162,6 @@ from typing import List, Dict, Tuple, Optional
 # ==========================================
 
 """
-Module d'extraction texte avec OCR ROBUSTE
-Prétraitement OpenCV + EasyOCR optimisé pour CNI/documents administratifs
 """
 
 
@@ -353,8 +350,6 @@ tesseract-ocr-fra
 # ==========================================
 
 """
-Module de classification contextuelle d'adresses
-Analyse sémantique pour distinguer domicile vs entreprise
 """
 
 
@@ -571,8 +566,6 @@ def classify_all_addresses(addresses: List[Dict], full_text: str, siret_address:
 # ==========================================
 
 """
-Module de validation API avec normalisation intelligente
-Gestion scores de confiance et interprétation robuste des réponses
 """
 
 
