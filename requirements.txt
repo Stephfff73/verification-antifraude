@@ -15,6 +15,7 @@ pandas>=2.0.0
 numpy>=1.24.0
 
 # ========== TRAITEMENT PDF ==========
+pdfplumber>=0.10.0
 PyPDF2>=3.0.0
 
 # ========== TRAITEMENT IMAGES + OCR ==========
