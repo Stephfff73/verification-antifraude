@@ -2968,7 +2968,7 @@ def main():
         '<div class="main-header">🔍 IN\'LI - DÉTECTION FRAUDE DOCUMENTAIRE</div>',
         unsafe_allow_html=True
     )
-
+if st.session_state.get('current_page') == 'home':
     st.markdown(
         """
         <div class="extraction-success">
