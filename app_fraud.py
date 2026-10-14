@@ -1,4 +1,3 @@
-
 import streamlit as st
 import pandas as pd
 from datetime import datetime
@@ -16,10 +15,13 @@ from geopy.distance import geodesic
 import dns.resolver
 from typing import Dict, List, Tuple, Optional
 import hashlib
+from verif_conformite import (
+    verifier_conformite_dossier, afficher_conformite, conformite_to_dataframe
+)
 
 # Configuration de la page
 st.set_page_config(
-    page_title="In'li - Anti-Fraude documentaire v5.0 local",
+    page_title="In'li - Anti-Fraude ULTIMATE v4.0",
     page_icon="🔍",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -128,12 +130,6 @@ if 'analysis_results' not in st.session_state:
     st.session_state.analysis_results = {}
 if 'external_validations' not in st.session_state:
     st.session_state.external_validations = {}
-if 'manager_audit_log' not in st.session_state:
-    st.session_state.manager_audit_log = []
-if 'manager_decision' not in st.session_state:
-    st.session_state.manager_decision = {}
-if 'case_reference' not in st.session_state:
-    st.session_state.case_reference = ''
 
 
 # ======================
@@ -142,7 +138,13 @@ if 'case_reference' not in st.session_state:
 
 
 # ========== IMPORTS SUPPLÉMENTAIRES ==========
-import cv2
+try:
+    import cv2
+except ImportError as _cv2_error:
+    # Ex. libGL.so.1 absent sur Streamlit Cloud avec opencv-python (non headless).
+    # L'app démarre quand même ; l'OCR des images fonctionnera sans prétraitement OpenCV.
+    cv2 = None
+    _CV2_ERROR = str(_cv2_error)
 import numpy as np
 import unicodedata
 from typing import List, Dict, Tuple, Optional
@@ -169,6 +171,12 @@ def preprocess_image_opencv(img_array):
     5. Augmentation contraste
     """
     
+    # Mode dégradé si OpenCV n'est pas disponible : simple niveaux de gris
+    if cv2 is None:
+        if len(img_array.shape) == 3:
+            return np.dot(img_array[..., :3], [0.299, 0.587, 0.114]).astype(np.uint8)
+        return img_array
+
     # 1. Conversion niveaux de gris
     if len(img_array.shape) == 3:
         gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
@@ -219,6 +227,43 @@ def preprocess_image_opencv(img_array):
     return morphed
 
 
+@st.cache_resource(show_spinner="Chargement du moteur OCR (première utilisation)...")
+def _get_easyocr_reader():
+    """Reader EasyOCR chargé UNE seule fois pour toute l'app (et non par session)."""
+    import easyocr
+    return easyocr.Reader(['fr', 'en'], gpu=False, verbose=False)
+
+
+def _ocr_easyocr(img):
+    try:
+        reader = _get_easyocr_reader()
+        result = reader.readtext(img, detail=0, paragraph=False)
+        return '\n'.join(result), "EasyOCR (prétraité)"
+    except ImportError:
+        return None, None
+    except Exception as e:
+        st.warning(f"⚠️ EasyOCR échoué : {str(e)[:100]}")
+        return None, None
+
+
+def _ocr_tesseract(img):
+    try:
+        import pytesseract
+        pil_img = Image.fromarray(img)
+        try:
+            texte = pytesseract.image_to_string(pil_img, config=r'--oem 3 --psm 6 -l fra')
+            if len(texte) < 30:
+                texte = pytesseract.image_to_string(pil_img, config=r'--oem 3 --psm 11 -l fra')
+        except Exception:
+            texte = pytesseract.image_to_string(pil_img, config=r'--oem 3 --psm 6 -l eng')
+        return texte, "Tesseract (prétraité, psm adapté)"
+    except ImportError:
+        return None, None
+    except Exception as e:
+        st.warning(f"⚠️ Tesseract échoué : {str(e)[:100]}")
+        return None, None
+
+
 def extract_text_from_image(image_file):
     """
     Extraction texte d'image avec OCR ROBUSTE
@@ -231,9 +276,12 @@ def extract_text_from_image(image_file):
     """
     try:
         # Charger image
-        img = Image.open(image_file)
-        img_array = np.array(img)
+        img = Image.open(image_file).convert('RGB')  # gère aussi RGBA / palette
         width, height = img.size
+        MAX_SIDE = 1800  # suffisant pour l'OCR, évite les pics mémoire sur Streamlit Cloud
+        if max(img.size) > MAX_SIDE:
+            img.thumbnail((MAX_SIDE, MAX_SIDE))
+        img_array = np.array(img)
         
         # Prétraitement OpenCV
         preprocessed = preprocess_image_opencv(img_array)
@@ -241,73 +289,22 @@ def extract_text_from_image(image_file):
         extracted_text = None
         ocr_method = None
         
-        # ========== MÉTHODE 1 : EasyOCR (OPTIMAL pour documents administratifs) ==========
-        try:
-            import easyocr
-            
-            # Initialiser reader (cache via session_state)
-            if 'easyocr_reader' not in st.session_state:
-                # gpu=False pour compatibilité Cloud
-                # lang=['fr','en'] pour documents mixtes
-                st.session_state.easyocr_reader = easyocr.Reader(
-                    ['fr', 'en'], 
-                    gpu=False,
-                    verbose=False
-                )
-            
-            reader = st.session_state.easyocr_reader
-            
-            # OCR sur image prétraitée
-            result = reader.readtext(preprocessed, detail=0, paragraph=False)
-            
-            # Reconstruction texte avec structure
-            extracted_text = '\n'.join(result)
-            ocr_method = "EasyOCR (prétraité)"
-            
-            if len(extracted_text) > 30:
-                return extracted_text, None
-        
-        except ImportError:
-            pass  # EasyOCR pas installé, passer au fallback
-        except Exception as e:
-            st.warning(f"⚠️ EasyOCR échoué : {str(e)[:100]}")
-        
-        # ========== MÉTHODE 2 : Tesseract avec PSM adapté (FALLBACK) ==========
-        try:
-            import pytesseract
-            
-            # Convertir numpy array en PIL Image pour pytesseract
-            pil_preprocessed = Image.fromarray(preprocessed)
-            
-            # PSM (Page Segmentation Mode) adapté :
-            # PSM 6 = assume a single uniform block of text (CNI)
-            # PSM 11 = sparse text, find as much text as possible (fiche paie)
-            
-            # Essayer PSM 6 d'abord (documents structurés)
-            try:
-                custom_config = r'--oem 3 --psm 6 -l fra'
-                extracted_text = pytesseract.image_to_string(pil_preprocessed, config=custom_config)
-                
-                # Si résultat insuffisant, essayer PSM 11
-                if len(extracted_text) < 30:
-                    custom_config = r'--oem 3 --psm 11 -l fra'
-                    extracted_text = pytesseract.image_to_string(pil_preprocessed, config=custom_config)
-            
-            except:
-                # Fallback anglais si français pas disponible
-                custom_config = r'--oem 3 --psm 6 -l eng'
-                extracted_text = pytesseract.image_to_string(pil_preprocessed, config=custom_config)
-            
-            ocr_method = "Tesseract (prétraité, psm adapté)"
-            
+        # ========== ORDRE DES MOTEURS OCR ==========
+        # Par défaut : Tesseract SEUL (léger). EasyOCR charge PyTorch (~600 Mo de RAM) et fait
+        # planter l'app entière sur Streamlit Cloud (1 Go) : il n'est donc PAS utilisé en secours.
+        # Pour l'activer (hébergement avec plus de mémoire) : OCR_ENGINE=easyocr (variable / secret).
+        if os.environ.get('OCR_ENGINE', '').lower() == 'easyocr':
+            ordre = ['easyocr', 'tesseract']
+        else:
+            ordre = ['tesseract']
+
+        for moteur in ordre:
+            texte, methode = _ocr_easyocr(preprocessed) if moteur == 'easyocr' else _ocr_tesseract(preprocessed)
+            if texte and len(texte) > len(extracted_text or ''):
+                extracted_text, ocr_method = texte, methode
             if extracted_text and len(extracted_text) > 30:
                 return extracted_text, None
-        
-        except ImportError:
-            pass
-        except Exception as e:
-            st.warning(f"⚠️ Tesseract échoué : {str(e)[:100]}")
-        
+
         # ========== ÉCHEC TOTAL ==========
         if extracted_text and len(extracted_text) > 10:
             return extracted_text, f"⚠️ OCR partiel via {ocr_method} ({width}x{height}px)"
@@ -317,13 +314,8 @@ def extract_text_from_image(image_file):
 
 ❌ **OCR non disponible**
 
-**Pour installer EasyOCR (RECOMMANDÉ) :**
-```bash
-pip install easyocr opencv-python
-```
-
-**Ou Tesseract :**
-- Créer `packages.txt` avec :
+**Tesseract (moteur OCR par défaut) :**
+- Vérifier que `packages.txt` contient :
 ```
 tesseract-ocr
 tesseract-ocr-fra
@@ -1467,12 +1459,12 @@ def extract_names(text: str) -> List[str]:
 
 API_CONFIG = {
     'insee_sirene': {
-        'base_url': 'https://eur03.safelinks.protection.outlook.com/?url=https%3A%2F%2Fapi.insee.fr%2Fentreprises%2Fsirene%2FV3.11&data=05%7C02%7Cstephanie.ammi%40inli.fr%7Cb1f4a3b8d30e4f2dde5d08de6a3b7eef%7C01a91ab5c50b4c0d8cfb59bc713898ab%7C0%7C0%7C639065000978230674%7CUnknown%7CTWFpbGZsb3d8eyJFbXB0eU1hcGkiOnRydWUsIlYiOiIwLjAuMDAwMCIsIlAiOiJXaW4zMiIsIkFOIjoiTWFpbCIsIldUIjoyfQ%3D%3D%7C0%7C%7C%7C&sdata=nZNDQqnUDOqEDYAFuRlslQFPEIcqh0Y4GgIp4BsvOZo%3D&reserved=0',
+        'base_url': 'https://api.insee.fr/entreprises/sirene/V3.11',
         'enabled': True,
         'requires_key': False
     },
     'adresse_gouv': {
-        'base_url': 'https://eur03.safelinks.protection.outlook.com/?url=https%3A%2F%2Fapi-adresse.data.gouv.fr%2F&data=05%7C02%7Cstephanie.ammi%40inli.fr%7Cb1f4a3b8d30e4f2dde5d08de6a3b7eef%7C01a91ab5c50b4c0d8cfb59bc713898ab%7C0%7C0%7C639065000978286360%7CUnknown%7CTWFpbGZsb3d8eyJFbXB0eU1hcGkiOnRydWUsIlYiOiIwLjAuMDAwMCIsIlAiOiJXaW4zMiIsIkFOIjoiTWFpbCIsIldUIjoyfQ%3D%3D%7C0%7C%7C%7C&sdata=Fl0K58xcD7eIdJhe6xtLAnebPlkJ9d21pMELSfiAsOg%3D&reserved=0',
+        'base_url': 'https://api-adresse.data.gouv.fr/',
         'enabled': True,
         'requires_key': False
     }
@@ -1722,6 +1714,15 @@ def calculate_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> Op
         return None
 
 
+# Clés réelles des champs de dépôt pour les justificatifs d'identité
+IDENTITY_PREFIXES = ('carte_identite', 'permis_conduire', 'passeport', 'titre_sejour')
+
+
+def is_identity_doc(doc_key: str) -> bool:
+    """True si le champ de dépôt correspond à un justificatif d'identité."""
+    return str(doc_key).startswith(IDENTITY_PREFIXES)
+
+
 # ======================
 # DÉTECTEUR RED FLAGS EXPERT v4.0
 # ======================
@@ -1766,7 +1767,7 @@ def detect_red_flags(documents_data: Dict, structured_data: Dict, external_valid
     company_addresses = []
 
     for doc_key, data in structured_data.items():
-        if 'piece_identite' in doc_key or 'quittance' in doc_key:
+        if is_identity_doc(doc_key) or 'quittance' in doc_key or doc_key.startswith('facture'):
             home_addresses.extend(data.get('addresses_detailed', []))
         if 'contrat_travail' in doc_key or 'fiche_paie' in doc_key:
             company_addresses.extend(data.get('addresses_detailed', []))
@@ -1811,19 +1812,19 @@ def detect_red_flags(documents_data: Dict, structured_data: Dict, external_valid
                 work['latitude'], work['longitude']
             )
 
-            if distance and distance > 200:
-                red_flags.append({
-                    'severity': 'medium',
-                    'category': 'Géographie',
-                    'message': f"⚠️ Distance domicile-travail très importante ({distance} km) - Vérifier télétravail",
-                    'score_impact': 12
-                })
-            elif distance and distance > 500:
+            if distance and distance > 500:
                 red_flags.append({
                     'severity': 'high',
                     'category': 'Géographie',
                     'message': f"🚨 Distance domicile-travail anormale ({distance} km) - Suspect",
                     'score_impact': 25
+                })
+            elif distance and distance > 200:
+                red_flags.append({
+                    'severity': 'medium',
+                    'category': 'Géographie',
+                    'message': f"⚠️ Distance domicile-travail très importante ({distance} km) - Vérifier télétravail",
+                    'score_impact': 12
                 })
 
     # ========== RED FLAG 5 : Incohérence salaire vs revenus ==========
@@ -1981,33 +1982,6 @@ def detect_red_flags(documents_data: Dict, structured_data: Dict, external_valid
 
 def perform_external_validations(documents_data: Dict, structured_data: Dict) -> Dict:
     """Orchestre toutes les validations externes - Version 4.0"""
-
-    # MODE CONFIDENTIEL LOCAL : aucun appel réseau, aucune donnée personnelle transmise.
-    # Les anciens contrôles API (adresse, SIRET, email) sont volontairement désactivés.
-    local_stats = {'total_sirets_found': 0, 'total_addresses_found': 0,
-                   'total_emails_found': 0, 'extraction_quality': 0}
-    for data in structured_data.values():
-        local_stats['total_sirets_found'] += len(data.get('siret', []))
-        local_stats['total_addresses_found'] += len(data.get('addresses_detailed', [])) + len(data.get('addresses', []))
-        local_stats['total_emails_found'] += len(data.get('emails', []))
-    local_flags = []
-    for doc_key, doc_data in documents_data.items():
-        validation = doc_data.get('validation', {}) or {}
-        for anomaly in validation.get('anomalies', []) or []:
-            local_flags.append({'category': 'Contrôle local — ' + str(doc_key),
-                                'message': str(anomaly), 'severity': 'medium', 'score_impact': 0})
-    local_flags.append({'category': 'Limite de contrôle',
-                        'message': 'Les vérifications externes d’adresse, SIRET et email sont désactivées pour préserver la confidentialité.',
-                        'severity': 'medium', 'score_impact': 0})
-    local_stats['extraction_quality'] = min(100,
-        (30 if local_stats['total_sirets_found'] else 0) +
-        (30 if local_stats['total_addresses_found'] else 0) +
-        (20 if local_stats['total_emails_found'] else 0) +
-        (20 if any((d.get('text_full_length') or 0) > 0 for d in documents_data.values()) else 0))
-    return {'siret_validation': None, 'address_home': None, 'address_work': None,
-            'email_validation': None, 'geographic_check': None,
-            'red_flags': local_flags, 'extraction_stats': local_stats,
-            'mode': 'local_sans_appel_externe'}
 
     validations = {
         'siret_validation': None,
@@ -2376,8 +2350,8 @@ def validate_document_professional(doc_type, metadata, text_content):
             anomalies.extend(checks_impots['anomalies'])
             score_fraude += checks_impots['score']
 
-        elif doc_type == 'piece_identite':
-            checks_id = validate_piece_identite(text_lower, text_content)
+        elif is_identity_doc(doc_type):
+            checks_id = validate_piece_identite(text_lower, text_content, doc_type)
             checks.update(checks_id['checks'])
             anomalies.extend(checks_id['anomalies'])
             score_fraude += checks_id['score']
@@ -2495,13 +2469,23 @@ def validate_avis_imposition(text):
     return {'score': score, 'anomalies': anomalies, 'checks': checks}
 
 
-def validate_piece_identite(text_lower, text_original):
-    """Validation pièce d'identité"""
+def validate_piece_identite(text_lower, text_original, doc_type=''):
+    """Validation pièce d'identité (adaptée au type de champ : recto, verso, passeport...)"""
     score = 0
     anomalies = []
     checks = {}
 
-    doc_types = ['carte nationale', 'identité', 'passeport', 'permis', 'conduire']
+    # Le verso d'une CNI ne porte ni 'République française' ni date de naissance :
+    # on cherche seulement la zone MRZ (IDFRA...) ou la mention d'adresse.
+    if doc_type == 'carte_identite_verso':
+        has_mrz = bool(re.search(r'idfra|<<', text_lower))
+        checks['has_mrz_or_address'] = has_mrz or 'adresse' in text_lower
+        if not checks['has_mrz_or_address']:
+            score += 10
+            anomalies.append("⚠️ Verso CNI : ni zone MRZ ni adresse détectées (scan peu lisible ?)")
+        return {'score': score, 'anomalies': anomalies, 'checks': checks}
+
+    doc_types = ['carte nationale', 'identité', 'passeport', 'permis', 'conduire', 'séjour', 'residence permit']
     has_id_type = any(doc_type in text_lower for doc_type in doc_types)
 
     checks['has_id_type'] = has_id_type
@@ -2609,8 +2593,11 @@ def cross_validate_dossier_advanced(documents_data, structured_data):
         anomalies.append("⚠️ Moins de 2 fiches de paie fournies - Dossier incomplet")
 
     # Documents requis
-    required_docs = ['contrat_travail', 'fiche_paie_1', 'avis_imposition', 'piece_identite']
+    required_docs = ['contrat_travail', 'fiche_paie_1', 'avis_imposition']
     missing_docs = [doc for doc in required_docs if doc not in documents_data]
+    # Au moins un justificatif d'identité (CNI, passeport, titre de séjour ou permis)
+    if not any(is_identity_doc(k) for k in documents_data):
+        missing_docs.append("justificatif d'identité")
 
     if missing_docs:
         checks['all_required_docs'] = False
@@ -2834,196 +2821,17 @@ def create_excel_report(analysis_results):
         df_extraction = pd.DataFrame(extraction_data)
         df_extraction.to_excel(writer, sheet_name='Données Extraites', index=False)
 
+        # Feuille 6: Conformité des pièces
+        conf = analysis_results.get('conformite')
+        if conf:
+            conformite_to_dataframe(conf).to_excel(writer, sheet_name='Conformité Pièces', index=False)
+            if conf.get('croises'):
+                pd.DataFrame(conf['croises']).rename(
+                    columns={'niveau': 'Niveau', 'message': 'Contrôle croisé'}
+                ).to_excel(writer, sheet_name='Contrôles Croisés', index=False)
+
     output.seek(0)
     return output
-
-
-# ================================
-# CONTRÔLE AUTOMATIQUE DU TYPE DE PIÈCE
-# ================================
-def _normaliser_texte_document(texte):
-    """Normalise le texte OCR pour une comparaison robuste des mots-clés."""
-    import unicodedata
-    texte = unicodedata.normalize("NFKD", (texte or "").lower())
-    texte = "".join(c for c in texte if not unicodedata.combining(c))
-    return re.sub(r"\s+", " ", texte)
-
-
-def verifier_type_document(doc_key, texte):
-    """Classement indicatif par indices textuels. Ne certifie jamais l'authenticité."""
-    t = _normaliser_texte_document(texte)
-    regles = {
-        "carte_identite_recto": ["carte nationale d'identite", "carte nationale d'identite", "republique francaise", "national identity card", "identite"],
-        "carte_identite_verso": ["carte nationale d'identite", "lieu de naissance", "taille", "signature", "autorite", "date de delivrance"],
-        "passeport": ["passeport", "passport", "passeport francais", "type p", "autorite"],
-        "titre_sejour": ["titre de sejour", "carte de sejour", "autorise son titulaire", "residence permit", "prefet"],
-        "permis_conduire": ["permis de conduire", "driving licence", "driving license", "categories de permis", "numero du titre"],
-        "fiche_paie_1": ["bulletin de paie", "bulletin de salaire", "net a payer", "salaire brut", "cotisations", "remuneration"],
-        "fiche_paie_2": ["bulletin de paie", "bulletin de salaire", "net a payer", "salaire brut", "cotisations", "remuneration"],
-        "fiche_paie_3": ["bulletin de paie", "bulletin de salaire", "net a payer", "salaire brut", "cotisations", "remuneration"],
-        "avis_imposition": ["avis d'impot", "avis d'imposition", "impot sur les revenus", "revenu fiscal de reference", "direction generale des finances publiques", "dgfip"],
-        "contrat_travail": ["contrat de travail", "entre les soussignes", "employeur", "salarie", "cdi", "cdd", "periode d'essai"],
-        "quittance_1": ["quittance de loyer", "quittance", "loyer acquitte", "bailleur", "locataire", "periode locative"],
-        "quittance_2": ["quittance de loyer", "quittance", "loyer acquitte", "bailleur", "locataire", "periode locative"],
-        "quittance_3": ["quittance de loyer", "quittance", "loyer acquitte", "bailleur", "locataire", "periode locative"],
-        "facture_electricite": ["facture d'electricite", "electricite", "kwh", "enedis", "edf"],
-        "facture_gaz": ["facture de gaz", "gaz naturel", "grdf", "consommation de gaz"],
-        "facture_internet": ["internet", "fibre", "abonnement internet", "telephone", "operateur", "box internet"],
-    }
-    if not t or len(t.strip()) < 25:
-        return {"statut": "À vérifier", "confiance": "Faible", "motif": "Texte insuffisant ou OCR indisponible : contrôle humain nécessaire."}
-    mots = regles.get(doc_key, [])
-    trouves = [m for m in mots if _normaliser_texte_document(m) in t]
-    # Exiger plusieurs indices pour éviter de valider sur un mot générique isolé.
-    seuil = 2 if doc_key.startswith(("fiche_paie", "quittance")) or doc_key in ("contrat_travail", "avis_imposition") else 1
-    if len(trouves) >= seuil:
-        confiance = "Élevée" if len(trouves) >= 3 else "Moyenne"
-        return {"statut": "Concordance probable", "confiance": confiance,
-                "motif": "Indices détectés : " + ", ".join(trouves[:5]) + ". À confirmer visuellement."}
-    # Cherche les indices de catégories manifestement différentes.
-    autres = {
-        "identité": ["carte nationale d'identite", "passeport", "titre de sejour", "permis de conduire"],
-        "paie": ["bulletin de paie", "bulletin de salaire", "net a payer", "cotisations"],
-        "impôt": ["avis d'imposition", "avis d'impot", "revenu fiscal de reference"],
-        "contrat": ["contrat de travail", "periode d'essai", "entre les soussignes"],
-        "loyer": ["quittance de loyer", "loyer acquitte", "periode locative"],
-        "facture": ["facture d'electricite", "consommation de gaz", "abonnement internet"]
-    }
-    groupes = {"identité": doc_key in ("carte_identite_recto", "carte_identite_verso", "passeport", "titre_sejour", "permis_conduire"),
-               "paie": doc_key.startswith("fiche_paie"), "impôt": doc_key == "avis_imposition",
-               "contrat": doc_key == "contrat_travail", "loyer": doc_key.startswith("quittance"),
-               "facture": doc_key.startswith("facture_")}
-    attendus = next((g for g, oui in groupes.items() if oui), None)
-    detectes = [g for g, termes in autres.items() if g != attendus and any(_normaliser_texte_document(x) in t for x in termes)]
-    if detectes:
-        return {"statut": "Possible erreur de classement", "confiance": "À confirmer",
-                "motif": "Le texte évoque plutôt : " + ", ".join(detectes) + ". Vérification humaine indispensable."}
-    return {"statut": "À vérifier", "confiance": "Faible", "motif": "Les indices attendus n'ont pas été retrouvés de façon suffisante."}
-
-
-def controler_classement_documents(documents):
-    controles = {}
-    for cle, info in documents.items():
-        texte = info.get("text_extract") or ""
-        controles[cle] = verifier_type_document(cle, texte)
-    return controles
-
-
-# ======================
-# CONTRÔLE DE DOSSIER & VALIDATION GESTIONNAIRE
-# ======================
-
-def construire_anomalies_dossier(uploaded_files, analysis_results):
-    """Contrôles de complétude/cohérence locaux. Les alertes sont des pistes, pas une décision."""
-    anomalies = []
-    keys = set(uploaded_files.keys())
-    # Pièces attendues selon les règles affichées dans le parcours actuel.
-    for key, label in [("contrat_travail", "Contrat de travail"), ("fiche_paie_1", "Fiche de paie récente"),
-                       ("fiche_paie_2", "Fiche de paie - mois précédent"), ("fiche_paie_3", "Fiche de paie - mois -2"),
-                       ("avis_imposition", "Avis d’imposition")]:
-        if key not in keys:
-            anomalies.append({'niveau':'À compléter','code':'PIECE_MANQUANTE','document':key,'detail':f'Pièce attendue absente : {label}.'})
-    if not any(k in keys for k in ('carte_identite_recto','passeport','titre_sejour','permis_conduire')):
-        anomalies.append({'niveau':'À compléter','code':'IDENTITE_ABSENTE','document':'identite','detail':'Aucun justificatif d’identité principal détecté.'})
-    if 'carte_identite_recto' in keys and 'carte_identite_verso' not in keys:
-        anomalies.append({'niveau':'À compléter','code':'CNI_VERSO_ABSENT','document':'carte_identite_verso','detail':'Recto de carte d’identité déposé sans verso.'})
-    if not all(k in keys for k in ('quittance_1','quittance_2','quittance_3')) and not any(k in keys for k in ('facture_electricite','facture_gaz','facture_internet')):
-        anomalies.append({'niveau':'À compléter','code':'DOMICILE_INCOMPLET','document':'domicile','detail':'Fournir les trois quittances demandées ou une facture de domicile recevable selon la procédure interne.'})
-    # Doublons exacts par empreinte SHA-256 calculée en mémoire, sans conserver le contenu.
-    empreintes = {}
-    for key, info in uploaded_files.items():
-        try:
-            f = info.get('file')
-            f.seek(0); digest = hashlib.sha256(f.getvalue()).hexdigest(); f.seek(0)
-            if digest in empreintes:
-                anomalies.append({'niveau':'À vérifier','code':'DOUBLON_EXACT','document':key,
-                                  'detail':f'Contenu identique au fichier déposé dans « {empreintes[digest]} ».'})
-            else: empreintes[digest] = key
-        except Exception:
-            anomalies.append({'niveau':'À vérifier','code':'EMPREINTE_INDISPONIBLE','document':key,'detail':'Impossible de comparer ce fichier aux autres pièces.'})
-    # Concordance type demandé / contenu OCR.
-    checks = (analysis_results or {}).get('document_type_checks', {})
-    for key, result in checks.items():
-        if result.get('statut') == 'Possible erreur de classement':
-            anomalies.append({'niveau':'Prioritaire','code':'TYPE_INCOHERENT','document':key,'detail':result.get('motif','Le type du document semble incohérent.')})
-        elif result.get('statut') == 'À vérifier':
-            anomalies.append({'niveau':'À vérifier','code':'OCR_OU_TYPE_INCERTAIN','document':key,'detail':result.get('motif','Concordance non établie.')})
-    # Vérifier si les périodes de bulletins reconnues sont répétées ou non ordonnables.
-    period_keys = [k for k in ('fiche_paie_1','fiche_paie_2','fiche_paie_3') if k in checks]
-    period_values = []
-    docs = (analysis_results or {}).get('documents', {})
-    for key in period_keys:
-        txt = (docs.get(key, {}).get('text_extract') or '')
-        matches = re.findall(r'(?<!\d)(0?[1-9]|1[0-2])[/ .-](20\d{2})(?!\d)', txt[:2000])
-        if matches:
-            period_values.append((key, f'{int(matches[0][0]):02d}/{matches[0][1]}'))
-    vals = [v for _,v in period_values]
-    if len(vals) != len(set(vals)) and vals:
-        anomalies.append({'niveau':'Prioritaire','code':'PERIODE_PAIE_REPETEE','document':'fiches_de_paie','detail':'Au moins deux fiches semblent porter la même période. Vérifier les dates sur les originaux.'})
-    if len(period_values) >= 2:
-        # Les périodes sont attendues récentes et distinctes; ne pas déduire automatiquement un rejet.
-        anomalies.append({'niveau':'Information','code':'PERIODES_OCR','document':'fiches_de_paie','detail':'Périodes extraites (OCR à confirmer) : ' + ', '.join(f'{k}={v}' for k,v in period_values) + '.'})
-    return anomalies
-
-def page_controle_gestionnaire():
-    st.markdown('## 🧑‍💼 Contrôle du gestionnaire')
-    st.caption('Les alertes assistent la revue humaine. Elles ne constituent ni une preuve de fraude ni un motif automatique de rejet.')
-    st.info('Confidentialité : analyse OCR et règles exécutées dans l’application. Les contrôles d’adresse/SIRET/email via API sont désactivés. Les fichiers ne sont pas ajoutés au journal exporté.')
-    if not st.session_state.analysis_results:
-        st.warning('Analysez d’abord les pièces du dossier pour activer la revue. La complétude des fichiers déposés peut toutefois être contrôlée après dépôt.')
-        if not st.session_state.uploaded_files: return
-    results = st.session_state.analysis_results or {}
-    anomalies = construire_anomalies_dossier(st.session_state.uploaded_files, results)
-    c1,c2,c3 = st.columns(3)
-    c1.metric('Pièces déposées', len(st.session_state.uploaded_files))
-    c2.metric('Anomalies / points à revoir', len(anomalies))
-    c3.metric('Alertes prioritaires', sum(1 for a in anomalies if a['niveau']=='Prioritaire'))
-    st.markdown('### 1. Anomalies détectées')
-    if anomalies:
-        st.dataframe(pd.DataFrame(anomalies), use_container_width=True, hide_index=True)
-    else:
-        st.success('Aucune anomalie de complétude ou de cohérence détectée par les règles activées. Cela ne certifie pas l’authenticité des pièces.')
-    st.markdown('### 2. Décision humaine')
-    ref = st.text_input('Référence interne du dossier (éviter nom, adresse ou autre donnée personnelle)', value=st.session_state.case_reference, key='manager_case_ref')
-    st.session_state.case_reference = ref
-    with st.form('manager_review_form', clear_on_submit=False):
-        gestionnaire = st.text_input('Identifiant professionnel du gestionnaire', placeholder='Initiales ou identifiant interne')
-        decision = st.radio('Décision de revue', ['En attente', 'Validé après contrôle', 'Compléments demandés', 'Escalade / expertise'], horizontal=True)
-        commentaire = st.text_area('Commentaire de contrôle (ne pas saisir de données personnelles inutiles)', max_chars=1500)
-        confirmation = st.checkbox('Je confirme avoir contrôlé visuellement les pièces et compris les limites des alertes automatiques.')
-        soumis = st.form_submit_button('Enregistrer la décision dans cette session', type='primary')
-    if soumis:
-        if not gestionnaire.strip(): st.error('Renseignez l’identifiant professionnel du gestionnaire.')
-        elif decision == 'Validé après contrôle' and not confirmation: st.error('Cochez la confirmation de contrôle visuel avant de valider.')
-        else:
-            entree = {'horodatage': datetime.now().isoformat(timespec='seconds'),
-                      'reference_dossier': ref.strip() or 'Non renseignée', 'gestionnaire': gestionnaire.strip(),
-                      'decision': decision, 'commentaire': commentaire.strip(),
-                      'nb_pieces': len(st.session_state.uploaded_files), 'nb_anomalies': len(anomalies),
-                      'codes_anomalies': sorted(set(a['code'] for a in anomalies)),
-                      'mode_analyse': 'OCR_et_regles_locaux_sans_API_externe'}
-            st.session_state.manager_decision = entree
-            st.session_state.manager_audit_log.append(entree)
-            st.success('Décision ajoutée au journal de cette session. Exportez le journal pour le conserver.')
-    decision_courante = st.session_state.manager_decision
-    if decision_courante:
-        st.markdown('### 3. Décision enregistrée')
-        st.json(decision_courante)
-    if st.session_state.manager_audit_log:
-        st.markdown('### 4. Historique de session')
-        st.dataframe(pd.DataFrame(st.session_state.manager_audit_log), use_container_width=True, hide_index=True)
-        payload = json.dumps(st.session_state.manager_audit_log, ensure_ascii=False, indent=2).encode('utf-8')
-        st.download_button('Télécharger le journal de contrôle (JSON)', data=payload,
-                           file_name='journal_controle_gestionnaire.json', mime='application/json')
-    st.warning('Limite de déploiement : le journal est conservé dans la session Streamlit et peut disparaître à la fermeture/redémarrage. Il n’est pas partagé entre comptes/ordinateurs. Pour une validation multi-gestionnaires persistante, prévoir une base privée avec authentification, droits d’accès, chiffrement, journalisation et politique de rétention validée par votre DPO.')
-    if st.button('🗑️ Effacer les pièces et résultats de cette session', type='secondary'):
-        st.session_state.uploaded_files = {}
-        st.session_state.analysis_results = {}
-        st.session_state.external_validations = {}
-        st.session_state.manager_decision = {}
-        st.session_state.manager_audit_log = []
-        st.session_state.case_reference = ''
-        st.success('Les pièces et résultats de cette session ont été retirés de l’état de l’application. Pensez aussi à fermer la session navigateur selon votre procédure interne.')
 
 
 # ======================
@@ -3069,6 +2877,7 @@ def analyze_all_documents():
                     results['documents'][doc_key] = {
                         'metadata': metadata,
                         'text_extract': text_extract[:2000] if text_extract else error_msg,
+                        'text_full': text_extract or '',
                         'text_full_length': len(text_extract) if text_extract else 0,
                         'validation': validation
                     }
@@ -3093,6 +2902,7 @@ def analyze_all_documents():
                             'risk_score': 25
                         },
                         'text_extract': text_extract if text_extract else error_msg,
+                        'text_full': text_extract or '',
                         'text_full_length': len(text_extract) if text_extract else 0,
                         'validation': {
                             'score_fraude': 0.25,
@@ -3140,8 +2950,9 @@ def analyze_all_documents():
 
         results['cross_validation'] = cross_validation
 
-        # Contrôle du type de pièce demandé vs texte réellement extrait
-        results['document_type_checks'] = controler_classement_documents(results['documents'])
+        # Phase 3 bis: conformité des pièces (type de document attendu)
+        status_text.text("✅ Contrôle de conformité des pièces...")
+        results['conformite'] = verifier_conformite_dossier(results['documents'])
 
         # Phase 4: Score global v4.0
         global_score = calculate_global_score(
@@ -3201,14 +3012,14 @@ def main():
         if os.path.exists("Logo - BO Fraudes in'li.png"):
             st.image("Logo - BO Fraudes in'li.png", width=250)
         else:
-            st.markdown("### 🔍 IN'LI - Anti-Fraude local")
+            st.markdown("### 🔍 IN'LI - Anti-Fraude")
 
         st.markdown("---")
 
         page = st.radio(
             "📋 Navigation",
-            ["🏠 Accueil", "📤 Télécharger Documents", "🔍 Analyse Individuelle",
-             "🧑‍💼 Contrôle gestionnaire", "🛡️ Contrôles locaux", "🚨 Red Flags", "📊 Analyse Globale", "📑 Rapport Excel"],
+            ["🏠 Accueil", "📤 Télécharger Documents", "✅ Conformité des pièces", "🔍 Analyse Individuelle",
+             "🌐 Validations Externes", "🚨 Red Flags", "📊 Analyse Globale", "📑 Rapport Excel"],
             index=0,
             key="navigation_radio"
         )
@@ -3237,11 +3048,11 @@ def main():
         page_accueil()
     elif page == "📤 Télécharger Documents":
         page_upload()
+    elif page == "✅ Conformité des pièces":
+        afficher_conformite(st.session_state.analysis_results)
     elif page == "🔍 Analyse Individuelle":
         page_analyse_individuelle()
-    elif page == "🧑‍💼 Contrôle gestionnaire":
-        page_controle_gestionnaire()
-    elif page == "🛡️ Contrôles locaux":
+    elif page == "🌐 Validations Externes":
         page_validations_externes()
     elif page == "🚨 Red Flags":
         page_red_flags()
@@ -3510,6 +3321,7 @@ def page_upload():
             with st.spinner("🔍 Analyse en cours avec extraction ultra-robuste..."):
                 analyze_all_documents()
                 st.success("✅ **Analyse terminée !**")
+                st.balloons()
 
                 if st.session_state.analysis_results:
                     score = st.session_state.analysis_results['global_score']['score']
@@ -3537,26 +3349,6 @@ def page_upload():
                         st.error(f"🚨 {verdict} - Score : {score:.1f}%")
     else:
         st.info("👆 Téléchargez au moins un document pour commencer")
-
-    # Résultats persistants du contrôle de concordance documentaire
-    checks = st.session_state.analysis_results.get("document_type_checks", {}) if st.session_state.analysis_results else {}
-    if checks:
-        st.markdown("---")
-        st.markdown("### 🧾 Contrôle automatique de concordance des pièces")
-        st.caption("Pré-classement à partir du texte OCR/extrait. Ce contrôle ne vérifie ni l'authenticité ni la validité juridique du document.")
-        lignes = []
-        for cle, resultat in checks.items():
-            nom = st.session_state.uploaded_files.get(cle, {}).get("name", cle)
-            lignes.append({"Pièce attendue": cle.replace("_", " ").title(), "Fichier": nom,
-                           "Résultat": resultat.get("statut", "À vérifier"),
-                           "Niveau indicatif": resultat.get("confiance", "—"),
-                           "Explication": resultat.get("motif", "")})
-        st.dataframe(pd.DataFrame(lignes), use_container_width=True, hide_index=True)
-        nb_a_verifier = sum(1 for x in checks.values() if x.get("statut") != "Concordance probable")
-        if nb_a_verifier:
-            st.warning(f"{nb_a_verifier} pièce(s) demandent une vérification humaine. Aucune pièce n'est rejetée automatiquement.")
-        else:
-            st.success("Une concordance probable a été détectée pour chaque pièce déposée. Un contrôle visuel reste recommandé.")
 
 
 def page_analyse_individuelle():
@@ -3669,8 +3461,7 @@ def page_analyse_individuelle():
 def page_validations_externes():
     """Page validations externes v4.0"""
 
-    st.markdown("## 🛡️ Contrôles locaux et limites")
-    st.info("Mode confidentialité activé : aucun appel aux API externes n’est effectué pendant l’analyse. Les contrôles en ligne SIRET, adresse et email sont désactivés.")
+    st.markdown("## 🌐 Validations Externes en Temps Réel")
 
     if not st.session_state.analysis_results:
         st.warning("⚠️ Effectuez d'abord l'analyse")
@@ -3699,7 +3490,7 @@ def page_validations_externes():
     st.markdown("---")
 
     # SIRET
-    st.markdown("### 🏢 SIRET détectés (non vérifiés en ligne)")
+    st.markdown("### 🏢 Vérification SIRET (API INSEE)")
 
     siret_info = external_val.get('siret_validation')
 
@@ -3732,7 +3523,7 @@ def page_validations_externes():
     st.markdown("---")
 
     # Adresses
-    st.markdown("### 📍 Adresses extraites (non vérifiées en ligne)")
+    st.markdown("### 📍 Validation Adresses (API Data.gouv)")
 
     col1, col2 = st.columns(2)
 
@@ -3767,7 +3558,7 @@ def page_validations_externes():
 def page_red_flags():
     """Page Red Flags v4.0"""
 
-    st.markdown("## 🚨 Alertes heuristiques à examiner")
+    st.markdown("## 🚨 Red Flags - Signaux d'Alerte Expert")
 
     if not st.session_state.analysis_results:
         st.warning("⚠️ Effectuez d'abord l'analyse")
