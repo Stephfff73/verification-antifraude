@@ -138,7 +138,13 @@ if 'external_validations' not in st.session_state:
 
 
 # ========== IMPORTS SUPPLÉMENTAIRES ==========
-import cv2
+try:
+    import cv2
+except ImportError as _cv2_error:
+    # Ex. libGL.so.1 absent sur Streamlit Cloud avec opencv-python (non headless).
+    # L'app démarre quand même ; l'OCR des images fonctionnera sans prétraitement OpenCV.
+    cv2 = None
+    _CV2_ERROR = str(_cv2_error)
 import numpy as np
 import unicodedata
 from typing import List, Dict, Tuple, Optional
@@ -165,6 +171,12 @@ def preprocess_image_opencv(img_array):
     5. Augmentation contraste
     """
     
+    # Mode dégradé si OpenCV n'est pas disponible : simple niveaux de gris
+    if cv2 is None:
+        if len(img_array.shape) == 3:
+            return np.dot(img_array[..., :3], [0.299, 0.587, 0.114]).astype(np.uint8)
+        return img_array
+
     # 1. Conversion niveaux de gris
     if len(img_array.shape) == 3:
         gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
