@@ -1,4 +1,3 @@
-
 import streamlit as st
 import pandas as pd
 from datetime import datetime
@@ -16,6 +15,9 @@ from geopy.distance import geodesic
 import dns.resolver
 from typing import Dict, List, Tuple, Optional
 import hashlib
+from verif_conformite import (
+    verifier_conformite_dossier, afficher_conformite, conformite_to_dataframe
+)
 
 # Configuration de la page
 st.set_page_config(
@@ -1461,12 +1463,12 @@ def extract_names(text: str) -> List[str]:
 
 API_CONFIG = {
     'insee_sirene': {
-        'base_url': 'https://eur03.safelinks.protection.outlook.com/?url=https%3A%2F%2Fapi.insee.fr%2Fentreprises%2Fsirene%2FV3.11&data=05%7C02%7Cstephanie.ammi%40inli.fr%7Cb1f4a3b8d30e4f2dde5d08de6a3b7eef%7C01a91ab5c50b4c0d8cfb59bc713898ab%7C0%7C0%7C639065000978230674%7CUnknown%7CTWFpbGZsb3d8eyJFbXB0eU1hcGkiOnRydWUsIlYiOiIwLjAuMDAwMCIsIlAiOiJXaW4zMiIsIkFOIjoiTWFpbCIsIldUIjoyfQ%3D%3D%7C0%7C%7C%7C&sdata=nZNDQqnUDOqEDYAFuRlslQFPEIcqh0Y4GgIp4BsvOZo%3D&reserved=0',
+        'base_url': 'https://api.insee.fr/entreprises/sirene/V3.11',
         'enabled': True,
         'requires_key': False
     },
     'adresse_gouv': {
-        'base_url': 'https://eur03.safelinks.protection.outlook.com/?url=https%3A%2F%2Fapi-adresse.data.gouv.fr%2F&data=05%7C02%7Cstephanie.ammi%40inli.fr%7Cb1f4a3b8d30e4f2dde5d08de6a3b7eef%7C01a91ab5c50b4c0d8cfb59bc713898ab%7C0%7C0%7C639065000978286360%7CUnknown%7CTWFpbGZsb3d8eyJFbXB0eU1hcGkiOnRydWUsIlYiOiIwLjAuMDAwMCIsIlAiOiJXaW4zMiIsIkFOIjoiTWFpbCIsIldUIjoyfQ%3D%3D%7C0%7C%7C%7C&sdata=Fl0K58xcD7eIdJhe6xtLAnebPlkJ9d21pMELSfiAsOg%3D&reserved=0',
+        'base_url': 'https://api-adresse.data.gouv.fr/',
         'enabled': True,
         'requires_key': False
     }
@@ -1716,6 +1718,15 @@ def calculate_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> Op
         return None
 
 
+# Clés réelles des champs de dépôt pour les justificatifs d'identité
+IDENTITY_PREFIXES = ('carte_identite', 'permis_conduire', 'passeport', 'titre_sejour')
+
+
+def is_identity_doc(doc_key: str) -> bool:
+    """True si le champ de dépôt correspond à un justificatif d'identité."""
+    return str(doc_key).startswith(IDENTITY_PREFIXES)
+
+
 # ======================
 # DÉTECTEUR RED FLAGS EXPERT v4.0
 # ======================
@@ -1760,7 +1771,7 @@ def detect_red_flags(documents_data: Dict, structured_data: Dict, external_valid
     company_addresses = []
 
     for doc_key, data in structured_data.items():
-        if 'piece_identite' in doc_key or 'quittance' in doc_key:
+        if is_identity_doc(doc_key) or 'quittance' in doc_key or doc_key.startswith('facture'):
             home_addresses.extend(data.get('addresses_detailed', []))
         if 'contrat_travail' in doc_key or 'fiche_paie' in doc_key:
             company_addresses.extend(data.get('addresses_detailed', []))
@@ -1805,19 +1816,19 @@ def detect_red_flags(documents_data: Dict, structured_data: Dict, external_valid
                 work['latitude'], work['longitude']
             )
 
-            if distance and distance > 200:
-                red_flags.append({
-                    'severity': 'medium',
-                    'category': 'Géographie',
-                    'message': f"⚠️ Distance domicile-travail très importante ({distance} km) - Vérifier télétravail",
-                    'score_impact': 12
-                })
-            elif distance and distance > 500:
+            if distance and distance > 500:
                 red_flags.append({
                     'severity': 'high',
                     'category': 'Géographie',
                     'message': f"🚨 Distance domicile-travail anormale ({distance} km) - Suspect",
                     'score_impact': 25
+                })
+            elif distance and distance > 200:
+                red_flags.append({
+                    'severity': 'medium',
+                    'category': 'Géographie',
+                    'message': f"⚠️ Distance domicile-travail très importante ({distance} km) - Vérifier télétravail",
+                    'score_impact': 12
                 })
 
     # ========== RED FLAG 5 : Incohérence salaire vs revenus ==========
@@ -2343,8 +2354,8 @@ def validate_document_professional(doc_type, metadata, text_content):
             anomalies.extend(checks_impots['anomalies'])
             score_fraude += checks_impots['score']
 
-        elif doc_type == 'piece_identite':
-            checks_id = validate_piece_identite(text_lower, text_content)
+        elif is_identity_doc(doc_type):
+            checks_id = validate_piece_identite(text_lower, text_content, doc_type)
             checks.update(checks_id['checks'])
             anomalies.extend(checks_id['anomalies'])
             score_fraude += checks_id['score']
@@ -2462,13 +2473,23 @@ def validate_avis_imposition(text):
     return {'score': score, 'anomalies': anomalies, 'checks': checks}
 
 
-def validate_piece_identite(text_lower, text_original):
-    """Validation pièce d'identité"""
+def validate_piece_identite(text_lower, text_original, doc_type=''):
+    """Validation pièce d'identité (adaptée au type de champ : recto, verso, passeport...)"""
     score = 0
     anomalies = []
     checks = {}
 
-    doc_types = ['carte nationale', 'identité', 'passeport', 'permis', 'conduire']
+    # Le verso d'une CNI ne porte ni 'République française' ni date de naissance :
+    # on cherche seulement la zone MRZ (IDFRA...) ou la mention d'adresse.
+    if doc_type == 'carte_identite_verso':
+        has_mrz = bool(re.search(r'idfra|<<', text_lower))
+        checks['has_mrz_or_address'] = has_mrz or 'adresse' in text_lower
+        if not checks['has_mrz_or_address']:
+            score += 10
+            anomalies.append("⚠️ Verso CNI : ni zone MRZ ni adresse détectées (scan peu lisible ?)")
+        return {'score': score, 'anomalies': anomalies, 'checks': checks}
+
+    doc_types = ['carte nationale', 'identité', 'passeport', 'permis', 'conduire', 'séjour', 'residence permit']
     has_id_type = any(doc_type in text_lower for doc_type in doc_types)
 
     checks['has_id_type'] = has_id_type
@@ -2576,8 +2597,11 @@ def cross_validate_dossier_advanced(documents_data, structured_data):
         anomalies.append("⚠️ Moins de 2 fiches de paie fournies - Dossier incomplet")
 
     # Documents requis
-    required_docs = ['contrat_travail', 'fiche_paie_1', 'avis_imposition', 'piece_identite']
+    required_docs = ['contrat_travail', 'fiche_paie_1', 'avis_imposition']
     missing_docs = [doc for doc in required_docs if doc not in documents_data]
+    # Au moins un justificatif d'identité (CNI, passeport, titre de séjour ou permis)
+    if not any(is_identity_doc(k) for k in documents_data):
+        missing_docs.append("justificatif d'identité")
 
     if missing_docs:
         checks['all_required_docs'] = False
@@ -2801,6 +2825,15 @@ def create_excel_report(analysis_results):
         df_extraction = pd.DataFrame(extraction_data)
         df_extraction.to_excel(writer, sheet_name='Données Extraites', index=False)
 
+        # Feuille 6: Conformité des pièces
+        conf = analysis_results.get('conformite')
+        if conf:
+            conformite_to_dataframe(conf).to_excel(writer, sheet_name='Conformité Pièces', index=False)
+            if conf.get('croises'):
+                pd.DataFrame(conf['croises']).rename(
+                    columns={'niveau': 'Niveau', 'message': 'Contrôle croisé'}
+                ).to_excel(writer, sheet_name='Contrôles Croisés', index=False)
+
     output.seek(0)
     return output
 
@@ -2848,6 +2881,7 @@ def analyze_all_documents():
                     results['documents'][doc_key] = {
                         'metadata': metadata,
                         'text_extract': text_extract[:2000] if text_extract else error_msg,
+                        'text_full': text_extract or '',
                         'text_full_length': len(text_extract) if text_extract else 0,
                         'validation': validation
                     }
@@ -2872,6 +2906,7 @@ def analyze_all_documents():
                             'risk_score': 25
                         },
                         'text_extract': text_extract if text_extract else error_msg,
+                        'text_full': text_extract or '',
                         'text_full_length': len(text_extract) if text_extract else 0,
                         'validation': {
                             'score_fraude': 0.25,
@@ -2918,6 +2953,10 @@ def analyze_all_documents():
         )
 
         results['cross_validation'] = cross_validation
+
+        # Phase 3 bis: conformité des pièces (type de document attendu)
+        status_text.text("✅ Contrôle de conformité des pièces...")
+        results['conformite'] = verifier_conformite_dossier(results['documents'])
 
         # Phase 4: Score global v4.0
         global_score = calculate_global_score(
@@ -2983,7 +3022,7 @@ def main():
 
         page = st.radio(
             "📋 Navigation",
-            ["🏠 Accueil", "📤 Télécharger Documents", "🔍 Analyse Individuelle",
+            ["🏠 Accueil", "📤 Télécharger Documents", "✅ Conformité des pièces", "🔍 Analyse Individuelle",
              "🌐 Validations Externes", "🚨 Red Flags", "📊 Analyse Globale", "📑 Rapport Excel"],
             index=0,
             key="navigation_radio"
@@ -3013,6 +3052,8 @@ def main():
         page_accueil()
     elif page == "📤 Télécharger Documents":
         page_upload()
+    elif page == "✅ Conformité des pièces":
+        afficher_conformite(st.session_state.analysis_results)
     elif page == "🔍 Analyse Individuelle":
         page_analyse_individuelle()
     elif page == "🌐 Validations Externes":
