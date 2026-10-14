@@ -26,8 +26,8 @@ Pillow>=10.0.0
 # Ne jamais installer "opencv-python" en parallèle : conflit avec easyocr.
 opencv-python-headless>=4.8.0
 
-# EasyOCR - Meilleur pour documents administratifs français
-easyocr>=1.7.0
+# EasyOCR RETIRÉ : PyTorch (~600 Mo RAM) fait planter Streamlit Cloud (1 Go).
+# Pour le réactiver (hébergement plus costaud) : ajouter easyocr>=1.7.0 + secret OCR_ENGINE=easyocr
 
 # Tesseract fallback (nécessite packages.txt : tesseract-ocr, tesseract-ocr-fra)
 pytesseract>=0.3.10
