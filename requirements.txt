@@ -11,6 +11,8 @@ streamlit>=1.28.0
 # ========== DONNÉES ==========
 pandas>=2.0.0
 numpy>=1.24.0
+# Moteur d'écriture du rapport Excel (pd.ExcelWriter engine='openpyxl')
+openpyxl>=3.1.0
 
 # ========== TRAITEMENT PDF ==========
 pdfplumber>=0.10.0
@@ -20,12 +22,14 @@ PyPDF2>=3.0.0
 Pillow>=10.0.0
 
 # OpenCV pour prétraitement image (CRITIQUE pour OCR)
-opencv-python>=4.8.0
+# IMPORTANT : version HEADLESS (pas de libGL sur Streamlit Cloud).
+# Ne jamais installer "opencv-python" en parallèle : conflit avec easyocr.
+opencv-python-headless>=4.8.0
 
 # EasyOCR - Meilleur pour documents administratifs français
 easyocr>=1.7.0
 
-# Tesseract fallback
+# Tesseract fallback (nécessite packages.txt : tesseract-ocr, tesseract-ocr-fra)
 pytesseract>=0.3.10
 
 # ========== API EXTERNES ==========
