@@ -227,6 +227,43 @@ def preprocess_image_opencv(img_array):
     return morphed
 
 
+@st.cache_resource(show_spinner="Chargement du moteur OCR (première utilisation)...")
+def _get_easyocr_reader():
+    """Reader EasyOCR chargé UNE seule fois pour toute l'app (et non par session)."""
+    import easyocr
+    return easyocr.Reader(['fr', 'en'], gpu=False, verbose=False)
+
+
+def _ocr_easyocr(img):
+    try:
+        reader = _get_easyocr_reader()
+        result = reader.readtext(img, detail=0, paragraph=False)
+        return '\n'.join(result), "EasyOCR (prétraité)"
+    except ImportError:
+        return None, None
+    except Exception as e:
+        st.warning(f"⚠️ EasyOCR échoué : {str(e)[:100]}")
+        return None, None
+
+
+def _ocr_tesseract(img):
+    try:
+        import pytesseract
+        pil_img = Image.fromarray(img)
+        try:
+            texte = pytesseract.image_to_string(pil_img, config=r'--oem 3 --psm 6 -l fra')
+            if len(texte) < 30:
+                texte = pytesseract.image_to_string(pil_img, config=r'--oem 3 --psm 11 -l fra')
+        except Exception:
+            texte = pytesseract.image_to_string(pil_img, config=r'--oem 3 --psm 6 -l eng')
+        return texte, "Tesseract (prétraité, psm adapté)"
+    except ImportError:
+        return None, None
+    except Exception as e:
+        st.warning(f"⚠️ Tesseract échoué : {str(e)[:100]}")
+        return None, None
+
+
 def extract_text_from_image(image_file):
     """
     Extraction texte d'image avec OCR ROBUSTE
@@ -239,9 +276,12 @@ def extract_text_from_image(image_file):
     """
     try:
         # Charger image
-        img = Image.open(image_file)
-        img_array = np.array(img)
+        img = Image.open(image_file).convert('RGB')  # gère aussi RGBA / palette
         width, height = img.size
+        MAX_SIDE = 1800  # suffisant pour l'OCR, évite les pics mémoire sur Streamlit Cloud
+        if max(img.size) > MAX_SIDE:
+            img.thumbnail((MAX_SIDE, MAX_SIDE))
+        img_array = np.array(img)
         
         # Prétraitement OpenCV
         preprocessed = preprocess_image_opencv(img_array)
@@ -249,73 +289,21 @@ def extract_text_from_image(image_file):
         extracted_text = None
         ocr_method = None
         
-        # ========== MÉTHODE 1 : EasyOCR (OPTIMAL pour documents administratifs) ==========
-        try:
-            import easyocr
-            
-            # Initialiser reader (cache via session_state)
-            if 'easyocr_reader' not in st.session_state:
-                # gpu=False pour compatibilité Cloud
-                # lang=['fr','en'] pour documents mixtes
-                st.session_state.easyocr_reader = easyocr.Reader(
-                    ['fr', 'en'], 
-                    gpu=False,
-                    verbose=False
-                )
-            
-            reader = st.session_state.easyocr_reader
-            
-            # OCR sur image prétraitée
-            result = reader.readtext(preprocessed, detail=0, paragraph=False)
-            
-            # Reconstruction texte avec structure
-            extracted_text = '\n'.join(result)
-            ocr_method = "EasyOCR (prétraité)"
-            
-            if len(extracted_text) > 30:
-                return extracted_text, None
-        
-        except ImportError:
-            pass  # EasyOCR pas installé, passer au fallback
-        except Exception as e:
-            st.warning(f"⚠️ EasyOCR échoué : {str(e)[:100]}")
-        
-        # ========== MÉTHODE 2 : Tesseract avec PSM adapté (FALLBACK) ==========
-        try:
-            import pytesseract
-            
-            # Convertir numpy array en PIL Image pour pytesseract
-            pil_preprocessed = Image.fromarray(preprocessed)
-            
-            # PSM (Page Segmentation Mode) adapté :
-            # PSM 6 = assume a single uniform block of text (CNI)
-            # PSM 11 = sparse text, find as much text as possible (fiche paie)
-            
-            # Essayer PSM 6 d'abord (documents structurés)
-            try:
-                custom_config = r'--oem 3 --psm 6 -l fra'
-                extracted_text = pytesseract.image_to_string(pil_preprocessed, config=custom_config)
-                
-                # Si résultat insuffisant, essayer PSM 11
-                if len(extracted_text) < 30:
-                    custom_config = r'--oem 3 --psm 11 -l fra'
-                    extracted_text = pytesseract.image_to_string(pil_preprocessed, config=custom_config)
-            
-            except:
-                # Fallback anglais si français pas disponible
-                custom_config = r'--oem 3 --psm 6 -l eng'
-                extracted_text = pytesseract.image_to_string(pil_preprocessed, config=custom_config)
-            
-            ocr_method = "Tesseract (prétraité, psm adapté)"
-            
+        # ========== ORDRE DES MOTEURS OCR ==========
+        # Par défaut : Tesseract (léger) puis EasyOCR en secours (PyTorch, ~600 Mo de RAM).
+        # Pour privilégier EasyOCR : définir OCR_ENGINE=easyocr (variable d'environnement / secret).
+        if os.environ.get('OCR_ENGINE', '').lower() == 'easyocr':
+            ordre = ['easyocr', 'tesseract']
+        else:
+            ordre = ['tesseract', 'easyocr']
+
+        for moteur in ordre:
+            texte, methode = _ocr_easyocr(preprocessed) if moteur == 'easyocr' else _ocr_tesseract(preprocessed)
+            if texte and len(texte) > len(extracted_text or ''):
+                extracted_text, ocr_method = texte, methode
             if extracted_text and len(extracted_text) > 30:
                 return extracted_text, None
-        
-        except ImportError:
-            pass
-        except Exception as e:
-            st.warning(f"⚠️ Tesseract échoué : {str(e)[:100]}")
-        
+
         # ========== ÉCHEC TOTAL ==========
         if extracted_text and len(extracted_text) > 10:
             return extracted_text, f"⚠️ OCR partiel via {ocr_method} ({width}x{height}px)"
